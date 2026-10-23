@@ -865,6 +865,22 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    private fun selectTab(index: Int) {
+        for (i in panels.indices) {
+            panels[i].visibility = if (i == index) View.VISIBLE else View.GONE
+        }
+        for (i in tabButtons.indices) {
+            val b = tabButtons[i]
+            if (i == index) {
+                b.background = roundedBg(accent, 10)
+                b.setTextColor(Color.BLACK)
+            } else {
+                b.background = roundedBg(bgPanel, 10)
+                b.setTextColor(Color.WHITE)
+            }
+        }
+    }
+
     private fun launchPicker() {
         pickVideos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
     }
