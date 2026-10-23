@@ -39,7 +39,7 @@ import androidx.media3.effect.OverlayEffect
 import androidx.media3.effect.Presentation
 import androidx.media3.effect.ScaleAndRotateTransformation
 import androidx.media3.effect.SpeedChangeEffect
-import androidx.media3.effect.StaticOverlaySettings
+import androidx.media3.effect.OverlaySettings
 import androidx.media3.effect.TextOverlay
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.SonicAudioProcessor
@@ -109,10 +109,10 @@ class MainActivity : AppCompatActivity() {
         tv.setPadding(0, dp(14), 0, dp(4))
         return tv
     }
-    private fun btn(text: String, onClick: () -> Unit): Button {
+    private fun btn(text: String, onClick: (View) -> Unit): Button {
         val b = Button(this)
         b.text = text
-        b.setOnClickListener { onClick() }
+        b.setOnClickListener(onClick)
         return b
     }
     private fun row(vararg views: View): LinearLayout {
@@ -347,9 +347,9 @@ class MainActivity : AppCompatActivity() {
             )
         }
         when (ratioMode) {
-            1 -> effects.add(Presentation.createForAspectRatio(9, 16, Presentation.SCALE_TO_FIT_WITH_CROP))
-            2 -> effects.add(Presentation.createForAspectRatio(1, 1, Presentation.SCALE_TO_FIT_WITH_CROP))
-            3 -> effects.add(Presentation.createForAspectRatio(16, 9, Presentation.SCALE_TO_FIT_WITH_CROP))
+            1 -> effects.add(Presentation.createForAspectRatio(9f / 16f, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
+            2 -> effects.add(Presentation.createForAspectRatio(1f, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
+            3 -> effects.add(Presentation.createForAspectRatio(16f / 9f, Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP))
         }
         if (speed != 1.0f) {
             effects.add(SpeedChangeEffect(speed))
@@ -363,7 +363,7 @@ class MainActivity : AppCompatActivity() {
             spannable.setSpan(StyleSpan(Typeface.BOLD), 0, text.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             spannable.setSpan(AbsoluteSizeSpan(130, false), 0, text.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             val anchorY = if (textOnTop) 0.78f else -0.78f
-            val settings = StaticOverlaySettings.Builder()
+            val settings = OverlaySettings.Builder()
                 .setBackgroundFrameAnchor(0f, anchorY)
                 .setOverlayFrameAnchor(0f, 0f)
                 .build()
@@ -443,10 +443,10 @@ class MainActivity : AppCompatActivity() {
                 )
             }
             val audioEdited = EditedMediaItem.Builder(audioItemBuilder.build()).build()
-            val composition = Composition.Builder()
-                .addSequence(EditedMediaItemSequence(editedBuilder.build()))
-                .addSequence(EditedMediaItemSequence(audioEdited))
-                .build()
+            val composition = Composition.Builder(
+                EditedMediaItemSequence(editedBuilder.build()),
+                EditedMediaItemSequence(audioEdited)
+            ).build()
             t.start(composition, outFile.absolutePath)
         } else {
             t.start(editedBuilder.build(), outFile.absolutePath)
