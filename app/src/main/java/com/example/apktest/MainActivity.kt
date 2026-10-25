@@ -15,7 +15,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
-import android.view.Gravity
+import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
@@ -30,11 +31,24 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 data class Variant(val quality: String, val url: String, val size: Long, val isAudio: Boolean)
+data class DownloadJob(
+    val id: Long,
+    val title: String,
+    var variant: Variant,
+    var state: String = "Đang chờ…",
+    var done: Long = 0,
+    var total: Long = -1,
+    var lastPct: Int = -1
+)
+class JobRow(val bar: ProgressBar, val status: TextView, val retry: Button)
 
 class MainActivity : AppCompatActivity() {
 
@@ -49,8 +63,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var thumbView: ImageView
     private lateinit var variantsBox: LinearLayout
     private lateinit var historyBox: LinearLayout
-    private lateinit var progressBar: ProgressBar
-    private lateinit var progressLabel: TextView
+    private lateinit var downloadsBox: LinearLayout
+    private lateinit var downloadsLabel: TextView
     private lateinit var mainPanel: View
     private lateinit var historyPanel: View
     private lateinit var tabDownloadBtn: Button
@@ -58,7 +72,12 @@ class MainActivity : AppCompatActivity() {
 
     private var variants: List<Variant> = emptyList()
     private var currentTitle: String = ""
-    private var downloading = false
+    private var nextJobId = 1L
+    private val jobQueue: ArrayDeque<DownloadJob> = ArrayDeque()
+    private val jobRows = HashMap<Long, JobRow>()
+    private val queueLock = Any()
+    private var activeJobs = 0
+    private val maxConcurrent = 3
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
     private fun roundedBg(color: Int, radiusDp: Int = 12): GradientDrawable {
@@ -75,6 +94,24 @@ class MainActivity : AppCompatActivity() {
         tv.setPadding(0, dp(8), 0, dp(2))
         return tv
     }
+    private fun pressable(v: View) {
+        v.setOnTouchListener { view, ev ->
+            when (ev.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    view.animate().scaleX(0.93f).scaleY(0.93f).setDuration(60).start()
+                    view.alpha = 0.85f
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    view.animate().scaleX(1f).scaleY(1f).setDuration(80).start()
+                    view.alpha = 1f
+                    if (ev.action == MotionEvent.ACTION_UP) {
+                        view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                    }
+                }
+            }
+            false
+        }
+    }
     private fun btn(text: String, bg: Int = -1, onClick: (View) -> Unit): Button {
         val b = Button(this)
         b.text = text
@@ -88,6 +125,7 @@ class MainActivity : AppCompatActivity() {
         b.background = roundedBg(if (bg == -1) bgBtn else bg)
         b.elevation = dp(3).toFloat()
         b.setOnClickListener(onClick)
+        pressable(b)
         return b
     }
     private fun row(vararg views: View): LinearLayout {
@@ -157,7 +195,7 @@ class MainActivity : AppCompatActivity() {
             btn("📋 Dán từ khay nhớ") { pasteFromClipboard() },
             btn("🔍 Tìm bản nét nhất", accent) { analyze() }
         ))
-        statusLabel = label("Sẵn sàng. Mẹo: trong app Douyin bấm Chia sẻ → Sao chép link, rồi qua đây bấm Dán.")
+        statusLabel = label("Sẵn sàng. Mẹo: trong app Douyin bấm Chia sẻ → Sao chép link, rồi qua đây bấm Dán. Tải được nhiều video cùng lúc.")
         mainBox.addView(statusLabel)
         thumbView = ImageView(this)
         thumbView.scaleType = ImageView.ScaleType.CENTER_CROP
@@ -171,15 +209,12 @@ class MainActivity : AppCompatActivity() {
         variantsBox = LinearLayout(this)
         variantsBox.orientation = LinearLayout.VERTICAL
         mainBox.addView(variantsBox)
-        progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
-        progressBar.max = 100
-        progressBar.progress = 0
-        progressBar.progressTintList = ColorStateList.valueOf(accent)
-        progressBar.visibility = View.GONE
-        mainBox.addView(progressBar)
-        progressLabel = label("")
-        progressLabel.visibility = View.GONE
-        mainBox.addView(progressLabel)
+        downloadsLabel = label("Đang tải:")
+        downloadsLabel.visibility = View.GONE
+        mainBox.addView(downloadsLabel)
+        downloadsBox = LinearLayout(this)
+        downloadsBox.orientation = LinearLayout.VERTICAL
+        mainBox.addView(downloadsBox)
         val mainScroll = ScrollView(this)
         mainScroll.addView(mainBox)
         mainPanel = mainScroll
@@ -322,7 +357,7 @@ class MainActivity : AppCompatActivity() {
                 currentTitle = json.optString("title", "video")
                 val thumb = json.optString("thumbnail", "")
                 runOnUiThread {
-                    statusLabel.text = "Tìm thấy ${list.size} bản. Bản ⭐ là nét nhất — đã tự chọn sẵn, bấm Tải là xong."
+                    statusLabel.text = "Tìm thấy ${list.size} bản. Bản ⭐ là nét nhất — bấm Tải là xong. Tải được nhiều video cùng lúc, tối đa 3 file chạy song song."
                     titleLabel.text = currentTitle
                     renderVariants()
                 }
@@ -373,72 +408,234 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ---------- Download queue: up to 3 files at once ----------
     private fun download(v: Variant) {
-        if (downloading) {
-            Toast.makeText(this, "Đang tải 1 file rồi, đợi xong đã anh", Toast.LENGTH_SHORT).show()
-            return
-        }
-        downloading = true
-        progressBar.visibility = View.VISIBLE
-        progressLabel.visibility = View.VISIBLE
-        progressBar.progress = 0
-        progressLabel.text = "Đang tải bản ${v.quality}…"
-        Thread {
-            var tmp: File? = null
-            try {
-                val conn = URL(v.url).openConnection() as HttpURLConnection
-                conn.setRequestProperty("User-Agent", uaString)
-                conn.setRequestProperty("Referer", "https://www.douyin.com/")
-                conn.connectTimeout = 20000
-                conn.readTimeout = 60000
-                conn.instanceFollowRedirects = true
-                val total = conn.contentLengthLong
-                tmp = File(cacheDir, if (v.isAudio) "dl_audio.mp3" else "dl_video.mp4")
-                conn.inputStream.use { input ->
-                    FileOutputStream(tmp).use { out ->
-                        val buf = ByteArray(64 * 1024)
-                        var done = 0L
-                        var lastPct = -1
-                        while (true) {
-                            val n = input.read(buf)
-                            if (n < 0) break
-                            out.write(buf, 0, n)
-                            done += n
-                            if (total > 0) {
-                                val pct = (done * 100 / total).toInt()
-                                if (pct != lastPct) {
-                                    lastPct = pct
-                                    runOnUiThread {
-                                        progressBar.progress = pct
-                                        progressLabel.text = "Đang tải bản ${v.quality}: $pct% (${fmtSize(done)}/${fmtSize(total)})"
-                                    }
-                                }
-                            } else {
-                                runOnUiThread { progressLabel.text = "Đang tải bản ${v.quality}: ${fmtSize(done)}" }
-                            }
-                        }
-                    }
-                }
-                val savedName = saveToMedia(tmp!!, v)
-                addHistory(currentTitle, v, savedName)
-                runOnUiThread {
-                    progressBar.progress = 100
-                    progressLabel.text = "✅ Xong! Đã lưu: $savedName"
-                    statusLabel.text = "Video nằm trong thư viện máy (mục Phim/SaveGo${if (v.isAudio) " — file tiếng ở Nhạc/SaveGo" else ""})."
-                    Toast.makeText(this, "Đã tải xong bản ${v.quality}", Toast.LENGTH_LONG).show()
-                }
-            } catch (e: Exception) {
-                runOnUiThread {
-                    progressLabel.text = "❌ Tải lỗi: ${e.message}"
-                    statusLabel.text = "Tải lỗi. Link tải có thể đã hết hạn — bấm Tìm bản nét nhất để quét lại link mới."
-                }
-            } finally {
-                tmp?.delete()
-                downloading = false
-            }
-        }.start()
+        val job = DownloadJob(nextJobId++, currentTitle.ifEmpty { "video" }, v)
+        runOnUiThread { addJobRow(job) }
+        synchronized(queueLock) { jobQueue.addLast(job) }
+        processQueue()
     }
 
+    private fun addJobRow(job: DownloadJob) {
+        downloadsLabel.visibility = View.VISIBLE
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(0, dp(6), 0, dp(6))
+        val titleTv = label("${job.title.take(60)} · bản ${job.variant.quality}", 13f)
+        titleTv.setTextColor(Color.WHITE)
+        box.addView(titleTv)
+        val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+        bar.max = 100
+        bar.progress = 0
+        bar.progressTintList = ColorStateList.valueOf(accent)
+        box.addView(bar)
+        val statusTv = label(job.state, 12f)
+        box.addView(statusTv)
+        val retryBtn = btn("↻ Tải lại") { retryJob(job) }
+        retryBtn.visibility = View.GONE
+        box.addView(retryBtn)
+        jobRows[job.id] = JobRow(bar, statusTv, retryBtn)
+        downloadsBox.addView(box)
+    }
+
+    private fun retryJob(job: DownloadJob) {
+        job.done = 0
+        job.total = -1
+        job.lastPct = -1
+        job.state = "Đang chờ…"
+        runOnUiThread {
+            jobRows[job.id]?.let {
+                it.bar.progress = 0
+                it.status.text = job.state
+                it.status.setTextColor(Color.rgb(215, 215, 220))
+                it.retry.visibility = View.GONE
+            }
+        }
+        synchronized(queueLock) { jobQueue.addLast(job) }
+        processQueue()
+    }
+
+    private fun processQueue() {
+        synchronized(queueLock) {
+            while (activeJobs < maxConcurrent && jobQueue.isNotEmpty()) {
+                val job = jobQueue.removeFirst()
+                activeJobs++
+                Thread {
+                    try { runJob(job) } finally {
+                        synchronized(queueLock) { activeJobs-- }
+                        processQueue()
+                    }
+                }.start()
+            }
+        }
+    }
+
+    private fun setJobState(job: DownloadJob, state: String) {
+        job.state = state
+        runOnUiThread {
+            jobRows[job.id]?.let {
+                it.status.text = state
+                when {
+                    state.startsWith("✅") -> it.status.setTextColor(Color.rgb(120, 220, 130))
+                    state.startsWith("❌") -> {
+                        it.status.setTextColor(Color.rgb(255, 120, 120))
+                        it.retry.visibility = View.VISIBLE
+                    }
+                    else -> it.status.setTextColor(Color.rgb(215, 215, 220))
+                }
+            }
+        }
+    }
+
+    private fun updateJobProgress(job: DownloadJob) {
+        if (job.total <= 0) return
+        val pct = (job.done * 100 / job.total).toInt().coerceIn(0, 100)
+        if (pct == job.lastPct) return
+        job.lastPct = pct
+        runOnUiThread {
+            jobRows[job.id]?.let {
+                it.bar.progress = pct
+                it.status.text = "${job.state} $pct% (${fmtSize(job.done)}/${fmtSize(job.total)})"
+            }
+        }
+    }
+
+    private fun runJob(job: DownloadJob) {
+        val others = variants
+            .filter { it.url != job.variant.url && !it.isAudio && labelScore(it.quality) >= 0 }
+            .sortedWith(compareByDescending<Variant> { labelScore(it.quality) }.thenByDescending { it.size })
+        val candidates = listOf(job.variant) + others
+        var ok = false
+        for (cand in candidates) {
+            setJobState(job, "Đang tải bản ${cand.quality}…")
+            val tmp = File(cacheDir, "dl_${job.id}.${if (cand.isAudio) "mp3" else "mp4"}")
+            if (tmp.exists()) tmp.delete()
+            val success = segmentedDownload(cand.url, tmp, job)
+            if (success) {
+                val saved = saveToMedia(tmp, cand)
+                tmp.delete()
+                addHistory(job.title, cand, saved)
+                runOnUiThread { jobRows[job.id]?.bar?.progress = 100 }
+                setJobState(job, "✅ Xong — $saved")
+                ok = true
+                break
+            } else {
+                tmp.delete()
+                if (cand.url != candidates.last().url) {
+                    setJobState(job, "Máy chủ này chậm/lỗi, đang đổi máy chủ khác…")
+                }
+            }
+        }
+        if (!ok) {
+            setJobState(job, "❌ Tải lỗi. Bấm Tải lại hoặc quét lại link mới.")
+        }
+    }
+
+    // ---------- Parallel segmented download (multi-connection) ----------
+    private fun openConn(url: String, range: String? = null): HttpURLConnection {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.setRequestProperty("User-Agent", uaString)
+        conn.setRequestProperty("Referer", "https://www.douyin.com/")
+        if (range != null) conn.setRequestProperty("Range", range)
+        conn.connectTimeout = 15000
+        conn.readTimeout = 30000
+        conn.instanceFollowRedirects = true
+        return conn
+    }
+
+    private fun downloadRange(url: String, start: Long, end: Long, dest: File, doneAtomic: AtomicLong, job: DownloadJob): Boolean {
+        return try {
+            val conn = openConn(url, "bytes=$start-$end")
+            if (conn.responseCode != 206) return false
+            conn.inputStream.use { input ->
+                RandomAccessFile(dest, "rw").use { raf ->
+                    raf.seek(start)
+                    val buf = ByteArray(256 * 1024)
+                    var pos = start
+                    while (pos <= end) {
+                        val n = input.read(buf, 0, minOf(buf.size.toLong(), end - pos + 1).toInt())
+                        if (n < 0) break
+                        raf.write(buf, 0, n)
+                        pos += n
+                        val d = doneAtomic.addAndGet(n.toLong())
+                        job.done = d
+                        updateJobProgress(job)
+                    }
+                    pos > end
+                }
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun streamDownload(url: String, dest: File, job: DownloadJob): Boolean {
+        return try {
+            val conn = openConn(url)
+            if (conn.responseCode !in 200..299) return false
+            job.total = conn.contentLengthLong
+            conn.inputStream.use { input ->
+                FileOutputStream(dest).use { out ->
+                    val buf = ByteArray(256 * 1024)
+                    var done = 0L
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        done += n
+                        job.done = done
+                        updateJobProgress(job)
+                    }
+                }
+            }
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun segmentedDownload(url: String, dest: File, job: DownloadJob): Boolean {
+        var total = -1L
+        try {
+            val probe = openConn(url, "bytes=0-0")
+            if (probe.responseCode == 206) {
+                val cr = probe.getHeaderField("Content-Range")
+                total = cr?.substringAfter('/')?.toLongOrNull() ?: -1
+            }
+            probe.disconnect()
+        } catch (e: Exception) { }
+        if (total <= 0) return streamDownload(url, dest, job)
+        job.total = total
+        job.done = 0
+        job.lastPct = -1
+        val segments = when {
+            total < 2_000_000 -> 2
+            total < 10_000_000 -> 6
+            else -> 8
+        }
+        try {
+            RandomAccessFile(dest, "rw").use { it.setLength(total) }
+        } catch (e: Exception) { return false }
+        val doneAtomic = AtomicLong(0)
+        val errors = AtomicInteger(0)
+        val threads = mutableListOf<Thread>()
+        for (s in 0 until segments) {
+            val start = total * s / segments
+            val end = if (s == segments - 1) total - 1 else total * (s + 1) / segments - 1
+            threads += Thread {
+                var ok = false
+                for (attempt in 0 until 3) {
+                    if (downloadRange(url, start, end, dest, doneAtomic, job)) { ok = true; break }
+                }
+                if (!ok) errors.incrementAndGet()
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+        return errors.get() == 0 && dest.exists() && dest.length() == total
+    }
+
+    // ---------- Save to gallery / history ----------
     private fun saveToMedia(file: File, v: Variant): String {
         val stamp = System.currentTimeMillis()
         return if (Build.VERSION.SDK_INT >= 29) {
