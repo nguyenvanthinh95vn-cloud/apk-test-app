@@ -72,6 +72,10 @@ class MainActivity : AppCompatActivity() {
 
     private var variants: List<Variant> = emptyList()
     private var currentTitle: String = ""
+    private var accelOn = false
+    private var workerUrl = ""
+    private var apiBase = "https://demo.tube5s.com/wp-json/aio-dl/api/?url="
+    private lateinit var accelBtn: Button
     private var nextJobId = 1L
     private val jobQueue: ArrayDeque<DownloadJob> = ArrayDeque()
     private val jobRows = HashMap<Long, JobRow>()
@@ -195,6 +199,12 @@ class MainActivity : AppCompatActivity() {
             btn("📋 Dán từ khay nhớ") { pasteFromClipboard() },
             btn("🔍 Tìm bản nét nhất", accent) { analyze() }
         ))
+        // One-button acceleration toggle: OFF = direct download, ON = via free Cloudflare Worker
+        accelBtn = btn("⚡ Tăng tốc (Cloudflare): TẮT") { toggleAccel() }
+        val accelLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        accelLp.setMargins(0, dp(4), 0, 0)
+        mainBox.addView(accelBtn, accelLp)
+        mainBox.addView(label("Chỉ bật khi tải chậm (buổi tối). Tắt khi tải nhanh để đỡ qua trung gian."))
         statusLabel = label("Sẵn sàng. Mẹo: trong app Douyin bấm Chia sẻ → Sao chép link, rồi qua đây bấm Dán. Tải được nhiều video cùng lúc.")
         mainBox.addView(statusLabel)
         thumbView = ImageView(this)
@@ -238,6 +248,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(histScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
         setContentView(root)
+        fetchRemoteConfig()
         renderHistory()
         handleIntent(intent)
     }
@@ -293,6 +304,67 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread { statusLabel.text = msg }
     }
 
+    // Remote config (savego-config.json in the repo): worker_url + api_url, read on launch
+    private fun fetchRemoteConfig() {
+        val prefs = getSharedPreferences("savego", Context.MODE_PRIVATE)
+        accelOn = prefs.getBoolean("accel_on", false)
+        workerUrl = prefs.getString("worker_url", "") ?: ""
+        apiBase = prefs.getString("api_url", apiBase) ?: apiBase
+        runOnUiThread { updateAccelBtn() }
+        Thread {
+            try {
+                val json = JSONObject(httpGetText("https://raw.githubusercontent.com/nguyenvanthinh95vn-cloud/apk-test-app/main/savego-config.json"))
+                val w = json.optString("worker_url", "")
+                val a = json.optString("api_url", "")
+                prefs.edit().apply {
+                    if (w.isNotEmpty() || json.has("worker_url")) putString("worker_url", w)
+                    if (a.isNotEmpty()) putString("api_url", a)
+                }.apply()
+                workerUrl = w
+                if (a.isNotEmpty()) apiBase = a
+                runOnUiThread { updateAccelBtn() }
+            } catch (e: Exception) { }
+        }.start()
+    }
+
+    private fun updateAccelBtn() {
+        if (!::accelBtn.isInitialized) return
+        if (accelOn) {
+            accelBtn.text = "⚡ Tăng tốc (Cloudflare): BẬT"
+            accelBtn.background = roundedBg(accent)
+            accelBtn.setTextColor(Color.BLACK)
+            accelBtn.setTypeface(null, Typeface.BOLD)
+        } else {
+            accelBtn.text = "⚡ Tăng tốc (Cloudflare): TẮT"
+            accelBtn.background = roundedBg(bgBtn)
+            accelBtn.setTextColor(Color.WHITE)
+            accelBtn.setTypeface(null, Typeface.NORMAL)
+        }
+    }
+
+    private fun toggleAccel() {
+        accelOn = !accelOn
+        getSharedPreferences("savego", Context.MODE_PRIVATE).edit().putBoolean("accel_on", accelOn).apply()
+        updateAccelBtn()
+        if (accelOn) {
+            if (workerUrl.isEmpty()) {
+                Toast.makeText(this, "Đã bật tăng tốc, nhưng chưa có địa chỉ máy chủ — cần triển khai Worker 1 lần trước", Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(this, "Đã bật tăng tốc qua Cloudflare", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Toast.makeText(this, "Đã tắt tăng tốc — tải trực tiếp", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun proxied(url: String): String {
+        return if (accelOn && workerUrl.isNotEmpty()) {
+            workerUrl.trimEnd('/') + "?u=" + URLEncoder.encode(url, "UTF-8")
+        } else {
+            url
+        }
+    }
+
     private fun httpGetText(url: String): String {
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.setRequestProperty("User-Agent", uaString)
@@ -331,7 +403,7 @@ class MainActivity : AppCompatActivity() {
         thumbView.visibility = View.GONE
         Thread {
             try {
-                val apiUrl = "https://demo.tube5s.com/wp-json/aio-dl/api/?url=" + URLEncoder.encode(url, "UTF-8")
+                val apiUrl = apiBase + URLEncoder.encode(url, "UTF-8")
                 val json = JSONObject(httpGetText(apiUrl))
                 val medias = json.optJSONArray("medias")
                 if (medias == null || medias.length() == 0) {
@@ -410,6 +482,10 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- Download queue: up to 3 files at once ----------
     private fun download(v: Variant) {
+        if (accelOn && workerUrl.isEmpty()) {
+            Toast.makeText(this, "Nút tăng tốc đang bật nhưng chưa có địa chỉ máy chủ — tắt nút hoặc triển khai Worker trước nhé", Toast.LENGTH_LONG).show()
+            return
+        }
         val job = DownloadJob(nextJobId++, currentTitle.ifEmpty { "video" }, v)
         runOnUiThread { addJobRow(job) }
         synchronized(queueLock) { jobQueue.addLast(job) }
@@ -510,7 +586,7 @@ class MainActivity : AppCompatActivity() {
             setJobState(job, "Đang tải bản ${cand.quality}…")
             val tmp = File(cacheDir, "dl_${job.id}.${if (cand.isAudio) "mp3" else "mp4"}")
             if (tmp.exists()) tmp.delete()
-            val success = segmentedDownload(cand.url, tmp, job)
+            val success = segmentedDownload(proxied(cand.url), tmp, job)
             if (success) {
                 val saved = saveToMedia(tmp, cand)
                 tmp.delete()
