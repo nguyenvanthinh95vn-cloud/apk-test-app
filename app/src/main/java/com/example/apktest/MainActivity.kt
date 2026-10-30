@@ -383,10 +383,211 @@ class MainActivity : AppCompatActivity() {
         return when {
             s.contains("watermark") -> -1
             s.contains("original") -> 400
-            s.contains("hd") -> 300
-            s.contains("sd") -> 200
-            s.contains("low") -> 100
+            s.contains("1080") -> 350
+            s.contains("hd") || s.contains("720") -> 300
+            s.contains("540") || s.contains("480") || s.contains("sd") -> 200
+            s.contains("low") || s.contains("360") || s.contains("240") -> 100
             else -> 150
+        }
+    }
+
+    // ---------- Quet thang tu Douyin (khong qua may chu trung gian) ----------
+    // Lan theo chuoi chuyen huong de lay id video tu link rut gon v.douyin.com/xxx
+    private fun resolveDouyinVideoId(shareUrl: String): String? {
+        var url = shareUrl
+        repeat(8) {
+            val conn = URL(url).openConnection() as HttpURLConnection
+            conn.instanceFollowRedirects = false
+            conn.setRequestProperty("User-Agent", uaString)
+            conn.connectTimeout = 15000
+            conn.readTimeout = 15000
+            try {
+                val code = conn.responseCode
+                if (code in 300..399) {
+                    val loc = conn.getHeaderField("Location") ?: return null
+                    url = if (loc.startsWith("http")) loc else URL(URL(url), loc).toString()
+                } else {
+                    return Regex("/video/(\\d+)").find(url)?.groupValues?.get(1)
+                }
+            } finally {
+                conn.disconnect()
+            }
+        }
+        return Regex("/video/(\\d+)").find(url)?.groupValues?.get(1)
+    }
+
+    private fun fetchDouyinHtml(videoId: String): String {
+        val conn = URL("https://www.douyin.com/video/$videoId").openConnection() as HttpURLConnection
+        conn.setRequestProperty("User-Agent", uaString)
+        conn.setRequestProperty("Referer", "https://www.douyin.com/")
+        conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        conn.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9,vi;q=0.8,en;q=0.7")
+        conn.connectTimeout = 20000
+        conn.readTimeout = 40000
+        conn.instanceFollowRedirects = true
+        val code = conn.responseCode
+        val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+            ?.bufferedReader()?.use { it.readText() } ?: ""
+        conn.disconnect()
+        if (code !in 200..299) throw RuntimeException("Douyin trả lỗi $code")
+        if (!text.contains("bit_rate")) throw RuntimeException("Douyin chặn truy cập trực tiếp")
+        return text
+    }
+
+    // Cat mang JSON theo key, vd extractJsonArray(html, "bit_rate") -> "[{...},{...}]"
+    private fun extractJsonArray(html: String, key: String): String? {
+        val startKey = html.indexOf("\"" + key + "\":")
+        if (startKey < 0) return null
+        var i = html.indexOf('[', startKey)
+        if (i < 0) return null
+        var depth = 0
+        var inStr = false
+        var esc = false
+        val sb = StringBuilder()
+        while (i < html.length) {
+            val c = html[i]
+            sb.append(c)
+            if (esc) esc = false
+            else if (inStr && c == '\\') esc = true
+            else if (c == '"') inStr = !inStr
+            else if (!inStr) {
+                if (c == '[') depth++
+                else if (c == ']') {
+                    depth--
+                    if (depth == 0) return sb.toString()
+                }
+            }
+            i++
+            if (sb.length > 2000000) return null
+        }
+        return null
+    }
+
+    private fun unescapeJson(raw: String): String {
+        val sb = StringBuilder()
+        var i = 0
+        while (i < raw.length) {
+            val c = raw[i]
+            if (c == '\\' && i + 1 < raw.length) {
+                val n = raw[i + 1]
+                when (n) {
+                    'n' -> sb.append('\n')
+                    't' -> sb.append('\t')
+                    'r' -> sb.append('\r')
+                    '"' -> sb.append('"')
+                    '\\' -> sb.append('\\')
+                    '/' -> sb.append('/')
+                    'u' -> {
+                        if (i + 5 < raw.length) {
+                            sb.append(raw.substring(i + 2, i + 6).toIntOrNull(16)?.toChar() ?: '?')
+                            i += 4
+                        }
+                    }
+                    else -> sb.append(n)
+                }
+                i += 2
+            } else {
+                sb.append(c)
+                i++
+            }
+        }
+        return sb.toString()
+    }
+
+    private fun extractDouyinDesc(html: String): String {
+        val key = "\"desc\":\""
+        val s = html.indexOf(key)
+        if (s < 0) return ""
+        var i = s + key.length
+        val sb = StringBuilder()
+        while (i < html.length) {
+            val c = html[i]
+            if (c == '\\' && i + 1 < html.length) {
+                sb.append(c); sb.append(html[i + 1]); i += 2
+            } else if (c == '"') {
+                break
+            } else {
+                sb.append(c); i++
+            }
+            if (sb.length > 500) break
+        }
+        return unescapeJson(sb.toString()).trim().take(120)
+    }
+
+    // Tra ve (tieu de, danh sach ban). Nem exception neu khong quet duoc.
+    private fun scanDouyinDirect(shareUrl: String): Pair<String, List<Variant>> {
+        val videoId = resolveDouyinVideoId(shareUrl)
+            ?: throw RuntimeException("Không đọc được id video từ link này")
+        val html = fetchDouyinHtml(videoId)
+        val arrText = extractJsonArray(html, "bit_rate")
+            ?: throw RuntimeException("Không tìm thấy các bản video trong trang Douyin")
+        val arr = JSONArray(arrText)
+        val list = mutableListOf<Variant>()
+        val seen = HashSet<String>()
+        for (i in 0 until arr.length()) {
+            val e = arr.optJSONObject(i) ?: continue
+            val gear = e.optString("gear_name", "")
+            val pa = e.optJSONObject("play_addr") ?: continue
+            val urls = pa.optJSONArray("url_list") ?: continue
+            val u = urls.optString(0, "")
+            if (u.isEmpty() || !seen.add(u)) continue
+            val label = when {
+                gear.contains("1080") -> "1080p"
+                gear.contains("720") -> "720p"
+                gear.contains("540") || gear.contains("480") -> "540p"
+                gear.contains("360") || gear.contains("240") -> "360p"
+                else -> gear.ifEmpty { "video" }
+            }
+            list.add(Variant(label, u, 0L, false))
+        }
+        if (list.isEmpty()) throw RuntimeException("Douyin không trả về bản video nào")
+        val title = extractDouyinDesc(html).ifEmpty { "douyin_$videoId" }
+        return Pair(title, list)
+    }
+
+    // Quet qua API trung gian (du phong khi quet thang that bai)
+    private fun scanViaApi(url: String): Triple<String, String, List<Variant>> {
+        val apiUrl = apiBase + URLEncoder.encode(url, "UTF-8")
+        val json = JSONObject(httpGetText(apiUrl))
+        val medias = json.optJSONArray("medias")
+        if (medias == null || medias.length() == 0) {
+            val err = json.optString("error", "")
+            throw RuntimeException(if (err.isNotEmpty()) err else "API không trả về video")
+        }
+        val list = mutableListOf<Variant>()
+        for (i in 0 until medias.length()) {
+            val m = medias.optJSONObject(i) ?: continue
+            val u = m.optString("url", "")
+            if (u.isEmpty()) continue
+            val q = m.optString("quality", "video")
+            val size = m.optString("size", "0").toLongOrNull() ?: 0L
+            val isAudio = q.lowercase().contains("kbps") || u.contains(".mp3") || q.lowercase().contains("audio")
+            list.add(Variant(q, u, size, isAudio))
+        }
+        if (list.isEmpty()) throw RuntimeException("Kết quả API trống")
+        return Triple(json.optString("title", "video"), json.optString("thumbnail", ""), list)
+    }
+
+    private fun showVariants(title: String, thumb: String, list: List<Variant>) {
+        variants = list
+        currentTitle = title
+        runOnUiThread {
+            statusLabel.text = "Tìm thấy ${list.size} bản. Bản ⭐ là nét nhất — bấm Tải là xong. Tải được nhiều video cùng lúc, tối đa 3 file chạy song song."
+            titleLabel.text = title
+            renderVariants()
+        }
+        if (thumb.isNotEmpty()) {
+            try {
+                val conn = URL(thumb).openConnection() as HttpURLConnection
+                conn.setRequestProperty("User-Agent", uaString)
+                conn.connectTimeout = 15000
+                conn.readTimeout = 15000
+                val bmp = conn.inputStream.use { BitmapFactory.decodeStream(it) }
+                if (bmp != null) runOnUiThread {
+                    thumbView.setImageBitmap(bmp)
+                    thumbView.visibility = View.VISIBLE
+                }
+            } catch (e: Exception) { }
         }
     }
 
@@ -403,51 +604,28 @@ class MainActivity : AppCompatActivity() {
         thumbView.visibility = View.GONE
         Thread {
             try {
-                val apiUrl = apiBase + URLEncoder.encode(url, "UTF-8")
-                val json = JSONObject(httpGetText(apiUrl))
-                val medias = json.optJSONArray("medias")
-                if (medias == null || medias.length() == 0) {
-                    val err = json.optString("error", "")
-                    setStatus(if (err.isNotEmpty()) "Không tải được: $err" else "Không tìm thấy video nào từ link này. Thử link khác nhé anh.")
-                    return@Thread
-                }
-                val list = mutableListOf<Variant>()
-                for (i in 0 until medias.length()) {
-                    val m = medias.optJSONObject(i) ?: continue
-                    val u = m.optString("url", "")
-                    if (u.isEmpty()) continue
-                    val q = m.optString("quality", "video")
-                    val size = m.optString("size", "0").toLongOrNull() ?: 0L
-                    val isAudio = q.lowercase().contains("kbps") || u.contains(".mp3") || q.lowercase().contains("audio")
-                    list.add(Variant(q, u, size, isAudio))
-                }
-                if (list.isEmpty()) {
-                    setStatus("Kết quả trống. Thử lại hoặc đổi link khác.")
-                    return@Thread
-                }
-                variants = list
-                currentTitle = json.optString("title", "video")
-                val thumb = json.optString("thumbnail", "")
-                runOnUiThread {
-                    statusLabel.text = "Tìm thấy ${list.size} bản. Bản ⭐ là nét nhất — bấm Tải là xong. Tải được nhiều video cùng lúc, tối đa 3 file chạy song song."
-                    titleLabel.text = currentTitle
-                    renderVariants()
-                }
-                if (thumb.isNotEmpty()) {
+                // Cach 1: quet thang tu Douyin, khong can may chu trung gian
+                if (url.contains("douyin.com")) {
                     try {
-                        val conn = URL(thumb).openConnection() as HttpURLConnection
-                        conn.setRequestProperty("User-Agent", uaString)
-                        conn.connectTimeout = 15000
-                        conn.readTimeout = 15000
-                        val bmp = conn.inputStream.use { BitmapFactory.decodeStream(it) }
-                        if (bmp != null) runOnUiThread {
-                            thumbView.setImageBitmap(bmp)
-                            thumbView.visibility = View.VISIBLE
-                        }
-                    } catch (e: Exception) { }
+                        val (t, l) = scanDouyinDirect(url)
+                        showVariants(t, "", l)
+                        return@Thread
+                    } catch (e: Exception) {
+                        // Roi xuong cach 2 ben duoi
+                    }
+                }
+                // Cach 2 (du phong): API trung gian
+                try {
+                    val (t, th, l) = scanViaApi(url)
+                    showVariants(t, th, l)
+                } catch (e: Exception) {
+                    val msg = e.message ?: "khong ro loi"
+                    setStatus(if (msg.contains("523"))
+                        "Máy chủ quét link trung gian đang sập (lỗi 523) — không phải lỗi mạng nhà anh. Link Douyin thì app tự quét thẳng được, anh thử lại nhé."
+                    else "Lỗi khi quét video: $msg. Kiểm tra mạng rồi thử lại.")
                 }
             } catch (e: Exception) {
-                setStatus("Lỗi khi quét video: ${e.message}. Kiểm tra mạng rồi thử lại.")
+                setStatus("Lỗi khi quét video: ${e.message}.")
             }
         }.start()
     }
