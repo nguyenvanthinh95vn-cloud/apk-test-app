@@ -18,6 +18,12 @@ import android.provider.MediaStore
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
+import android.webkit.WebViewClient
+import android.webkit.WebView
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceError
+import android.webkit.JavascriptInterface
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
@@ -391,48 +397,71 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ---------- Quet thang tu Douyin (khong qua may chu trung gian) ----------
-    // Lan theo chuoi chuyen huong de lay id video tu link rut gon v.douyin.com/xxx
-    private fun resolveDouyinVideoId(shareUrl: String): String? {
-        var url = shareUrl
-        repeat(8) {
-            val conn = URL(url).openConnection() as HttpURLConnection
-            conn.instanceFollowRedirects = false
-            conn.setRequestProperty("User-Agent", uaString)
-            conn.connectTimeout = 15000
-            conn.readTimeout = 15000
-            try {
-                val code = conn.responseCode
-                if (code in 300..399) {
-                    val loc = conn.getHeaderField("Location") ?: return null
-                    url = if (loc.startsWith("http")) loc else URL(URL(url), loc).toString()
-                } else {
-                    return Regex("/video/(\\d+)").find(url)?.groupValues?.get(1)
-                }
-            } finally {
-                conn.disconnect()
-            }
-        }
-        return Regex("/video/(\\d+)").find(url)?.groupValues?.get(1)
+    // ---------- Quét thẳng từ Douyin bằng WebView (giả làm trình duyệt thật) ----------
+    // Douyin chặn kiểu tải thô (link rút gọn còn bị đá về trang chủ), nhưng WebView
+    // chạy JavaScript như Chrome thật nên vượt được màn chống bot của nó.
+    private class ScanState {
+        @Volatile var webView: WebView? = null
+        @Volatile var html: String? = null
+        @Volatile var pageUrl: String = ""
+        @Volatile var error: String? = null
     }
 
-    private fun fetchDouyinHtml(videoId: String): String {
-        val conn = URL("https://www.douyin.com/video/$videoId").openConnection() as HttpURLConnection
-        conn.setRequestProperty("User-Agent", uaString)
-        conn.setRequestProperty("Referer", "https://www.douyin.com/")
-        conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        conn.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9,vi;q=0.8,en;q=0.7")
-        conn.connectTimeout = 20000
-        conn.readTimeout = 40000
-        conn.instanceFollowRedirects = true
-        val code = conn.responseCode
-        val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
-            ?.bufferedReader()?.use { it.readText() } ?: ""
-        conn.disconnect()
-        if (code !in 200..299) throw RuntimeException("Douyin trả lỗi $code")
-        if (!text.contains("bit_rate")) throw RuntimeException("Douyin chặn truy cập trực tiếp")
-        return text
+    private val scanJs = "(function(){try{var h=document.documentElement.outerHTML;" +
+        "if(h&&h.indexOf('bit_rate')>=0){HtmlHook.pushHtml(h,location.href)}}catch(e){}})()"
+
+    private fun setupScanWebView(shareUrl: String, state: ScanState) {
+        val wv = WebView(this)
+        state.webView = wv
+        wv.settings.javaScriptEnabled = true
+        wv.settings.domStorageEnabled = true
+        wv.settings.userAgentString = uaString
+        wv.addJavascriptInterface(object {
+            @JavascriptInterface
+            fun pushHtml(h: String, u: String) {
+                if (state.html == null && h.contains("bit_rate")) {
+                    state.html = h
+                    state.pageUrl = u
+                }
+            }
+        }, "HtmlHook")
+        wv.webViewClient = object : WebViewClient() {
+            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                if (request.isForMainFrame && state.error == null) {
+                    state.error = "Không mở được trang Douyin (${error.description})"
+                }
+            }
+        }
+        (linkInput.parent as? ViewGroup)?.addView(wv, 1, 1)
+        wv.loadUrl(shareUrl)
     }
+
+    private fun fetchDouyinHtmlViaWebView(shareUrl: String): Pair<String, String> {
+        val state = ScanState()
+        runOnUiThread { setupScanWebView(shareUrl, state) }
+        val deadline = System.currentTimeMillis() + 30000
+        try {
+            while (System.currentTimeMillis() < deadline) {
+                if (state.html != null || state.error != null) break
+                Thread.sleep(1500)
+                runOnUiThread {
+                    try { state.webView?.evaluateJavascript(scanJs, null) } catch (ignored: Exception) { }
+                }
+            }
+        } catch (ignored: InterruptedException) { }
+        runOnUiThread {
+            try {
+                (state.webView?.parent as? ViewGroup)?.removeView(state.webView)
+                state.webView?.destroy()
+            } catch (ignored: Exception) { }
+            state.webView = null
+        }
+        state.error?.let { throw RuntimeException(it) }
+        val html = state.html
+            ?: throw RuntimeException("Douyin không trả dữ liệu video (link có thể đã hết hạn)")
+        return Pair(state.pageUrl, html)
+    }
+
 
     // Cat mang JSON theo key, vd extractJsonArray(html, "bit_rate") -> "[{...},{...}]"
     private fun extractJsonArray(html: String, key: String): String? {
@@ -514,11 +543,11 @@ class MainActivity : AppCompatActivity() {
         return unescapeJson(sb.toString()).trim().take(120)
     }
 
-    // Tra ve (tieu de, danh sach ban). Nem exception neu khong quet duoc.
+    // Trả về (tiêu đề, danh sách bản). Ném exception nếu không quét được.
     private fun scanDouyinDirect(shareUrl: String): Pair<String, List<Variant>> {
-        val videoId = resolveDouyinVideoId(shareUrl)
-            ?: throw RuntimeException("Không đọc được id video từ link này")
-        val html = fetchDouyinHtml(videoId)
+        setStatus("Đang mở Douyin để quét (giả làm trình duyệt, mất khoảng 10-20 giây)…")
+        val (pageUrl, html) = fetchDouyinHtmlViaWebView(shareUrl)
+        val videoId = Regex("/video/(\\d+)").find(pageUrl)?.groupValues?.get(1) ?: "video"
         val arrText = extractJsonArray(html, "bit_rate")
             ?: throw RuntimeException("Không tìm thấy các bản video trong trang Douyin")
         val arr = JSONArray(arrText)
@@ -544,6 +573,7 @@ class MainActivity : AppCompatActivity() {
         val title = extractDouyinDesc(html).ifEmpty { "douyin_$videoId" }
         return Pair(title, list)
     }
+
 
     // Quet qua API trung gian (du phong khi quet thang that bai)
     private fun scanViaApi(url: String): Triple<String, String, List<Variant>> {
@@ -605,13 +635,14 @@ class MainActivity : AppCompatActivity() {
         Thread {
             try {
                 // Cach 1: quet thang tu Douyin, khong can may chu trung gian
+                var directErr = ""
                 if (url.contains("douyin.com")) {
                     try {
                         val (t, l) = scanDouyinDirect(url)
                         showVariants(t, "", l)
                         return@Thread
                     } catch (e: Exception) {
-                        // Roi xuong cach 2 ben duoi
+                        directErr = e.message ?: "không rõ lỗi"
                     }
                 }
                 // Cach 2 (du phong): API trung gian
@@ -621,7 +652,7 @@ class MainActivity : AppCompatActivity() {
                 } catch (e: Exception) {
                     val msg = e.message ?: "khong ro loi"
                     setStatus(if (msg.contains("523"))
-                        "Máy chủ quét link trung gian đang sập (lỗi 523) — không phải lỗi mạng nhà anh. Link Douyin thì app tự quét thẳng được, anh thử lại nhé."
+                        "Máy chủ quét link trung gian đang sập (lỗi 523) — không phải lỗi mạng nhà anh. Quét thẳng cũng lỗi: $directErr. Anh thử lại sau ít phút nhé."
                     else "Lỗi khi quét video: $msg. Kiểm tra mạng rồi thử lại.")
                 }
             } catch (e: Exception) {
