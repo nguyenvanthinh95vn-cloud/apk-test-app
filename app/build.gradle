@@ -9,8 +9,8 @@ android {
         applicationId "com.example.apktest"
         minSdk 24
         targetSdk 34
-        versionCode 8
-        versionName "6.2"
+        versionCode 9
+        versionName "6.3"
     }
     buildTypes { release { minifyEnabled false } }
     compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
