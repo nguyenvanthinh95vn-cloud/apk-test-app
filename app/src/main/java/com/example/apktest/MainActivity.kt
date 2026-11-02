@@ -844,6 +844,31 @@ class MainActivity : AppCompatActivity() {
         return out
     }
 
+    // Giải mã nhúng vixeo.io: trang nhúng giấu link m3u8 trong 1 chuỗi base64,
+    // bên trong là JSON có trường "source" = các đoạn hex nối bằng |, giải hex rồi ĐẢO NGƯỢC chuỗi là ra link thật.
+    private fun decodeVixeoEmbed(embedUrl: String, referer: String): String? {
+        return try {
+            val html = httpGetWithReferer(embedUrl, referer)
+            val blobs = Regex("\"([A-Za-z0-9+/=]{200,})\"").findAll(html).map { it.groupValues[1] }.distinct().toList()
+            for (b in blobs) {
+                try {
+                    val jsonText = String(android.util.Base64.decode(b, android.util.Base64.DEFAULT), Charsets.UTF_8)
+                    val source = JSONObject(jsonText).optString("source", "")
+                    if (source.isEmpty()) continue
+                    val joined = source.split("|").mapNotNull { part ->
+                        try {
+                            String(part.chunked(2).map { it.toInt(16).toByte() }.toByteArray(), Charsets.UTF_8)
+                        } catch (e: Exception) { null }
+                    }.joinToString("")
+                    if (joined.isEmpty()) continue
+                    val url = joined.reversed()
+                    if (url.contains(".m3u8")) return url
+                } catch (e: Exception) { }
+            }
+            null
+        } catch (e: Exception) { null }
+    }
+
     // Trả về (tiêu đề, url trang cuối, danh sách bản)
     private fun sniffWebPage(pageUrl: String): Triple<String, String, List<Variant>> {
         val low = pageUrl.lowercase()
@@ -870,6 +895,20 @@ class MainActivity : AppCompatActivity() {
         }
         val list = mutableListOf<Variant>()
         var dashSkipped = 0
+        // Riêng host vixeo.io: giải mã nhúng 2 lớp lấy link m3u8 thật
+        if (html.isNotEmpty()) {
+            val iframeUrls = Regex("<iframe[^>]+src\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                .findAll(html).map { it.groupValues[1] }.toList()
+            for (f in iframeUrls) {
+                val fu = resolveUrl(finalUrl, f)
+                if (fu.contains("vixeo.io")) {
+                    val m3u8 = decodeVixeoEmbed(fu, finalUrl)
+                    if (m3u8 != null) {
+                        try { list.addAll(parseM3u8Variants(m3u8, finalUrl)) } catch (e: Exception) { }
+                    }
+                }
+            }
+        }
         for (rawU in cands.take(25)) {
             val u = resolveUrl(finalUrl, rawU).trim('\'', '"')
             if (u.isEmpty() || u.startsWith("blob:") || u.startsWith("data:")) continue
