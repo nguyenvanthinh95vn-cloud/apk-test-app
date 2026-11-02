@@ -44,11 +44,13 @@ import java.net.URLEncoder
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
-data class Variant(val quality: String, val url: String, val size: Long, val isAudio: Boolean)
+data class Variant(val quality: String, val url: String, val size: Long, val isAudio: Boolean, val kind: String = "file")
 data class DownloadJob(
     val id: Long,
     val title: String,
     var variant: Variant,
+    var referer: String = "",
+    var source: List<Variant> = emptyList(),
     var state: String = "Đang chờ…",
     var done: Long = 0,
     var total: Long = -1,
@@ -75,6 +77,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var historyPanel: View
     private lateinit var tabDownloadBtn: Button
     private lateinit var tabHistoryBtn: Button
+    private lateinit var webPanel: View
+    private lateinit var tabWebBtn: Button
+    private lateinit var webLinkInput: EditText
+    private lateinit var webStatusLabel: TextView
+    private lateinit var webVariantsBox: LinearLayout
+    private var webTitle: String = ""
+    private var webPageUrl: String = ""
+    private var webVariants: List<Variant> = emptyList()
 
     private var variants: List<Variant> = emptyList()
     private var currentTitle: String = ""
@@ -182,9 +192,10 @@ class MainActivity : AppCompatActivity() {
         root.addView(header)
 
         // Tabs
-        tabDownloadBtn = btn("⬇  Tải video", accent) { showTab(true) }
-        tabHistoryBtn = btn("🕘  Lịch sử") { showTab(false) }
-        val tabRow = row(tabDownloadBtn, tabHistoryBtn)
+        tabDownloadBtn = btn("⬇  Tải video", accent) { showTab(0) }
+        tabWebBtn = btn("🔗  Link web") { showTab(1) }
+        tabHistoryBtn = btn("🕘  Lịch sử") { showTab(2) }
+        val tabRow = row(tabDownloadBtn, tabWebBtn, tabHistoryBtn)
         tabRow.setPadding(dp(8), dp(2), dp(8), dp(2))
         root.addView(tabRow)
 
@@ -236,6 +247,35 @@ class MainActivity : AppCompatActivity() {
         mainPanel = mainScroll
         root.addView(mainScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
+        // Web sniffer panel (kiểu Cốc Cốc: dán link trang web -> tự bóc video)
+        val webBox = LinearLayout(this)
+        webBox.orientation = LinearLayout.VERTICAL
+        webBox.setPadding(dp(12), dp(6), dp(12), dp(16))
+        webBox.addView(label("Dán link trang web có video (phim, tin tức, Facebook…) vào đây:"))
+        webLinkInput = EditText(this)
+        webLinkInput.hint = "https://…"
+        webLinkInput.setTextColor(Color.WHITE)
+        webLinkInput.setHintTextColor(Color.rgb(150, 150, 155))
+        webLinkInput.background = roundedBg(bgBtn, 10)
+        webLinkInput.setPadding(dp(10), dp(10), dp(10), dp(10))
+        webLinkInput.maxLines = 3
+        webBox.addView(webLinkInput)
+        webBox.addView(row(
+            btn("📋 Dán từ khay nhớ") { pasteWebFromClipboard() },
+            btn("🔍 Tìm video", accent) { sniffWeb() }
+        ))
+        webBox.addView(label("Tự bóc các file video trong trang (mp4, HLS…). YouTube và luồng DASH chưa hỗ trợ ở bản này."))
+        webStatusLabel = label("Mẹo: mở trang web có video, sao chép địa chỉ trang rồi dán vào đây.")
+        webBox.addView(webStatusLabel)
+        webVariantsBox = LinearLayout(this)
+        webVariantsBox.orientation = LinearLayout.VERTICAL
+        webBox.addView(webVariantsBox)
+        val webScroll = ScrollView(this)
+        webScroll.addView(webBox)
+        webScroll.visibility = View.GONE
+        webPanel = webScroll
+        root.addView(webScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
         // History panel
         val histBox = LinearLayout(this)
         histBox.orientation = LinearLayout.VERTICAL
@@ -268,9 +308,15 @@ class MainActivity : AppCompatActivity() {
         val text = intent?.getStringExtra(Intent.EXTRA_TEXT) ?: return
         val url = extractUrl(text)
         if (url != null) {
-            linkInput.setText(url)
-            showTab(true)
-            analyze()
+            if (url.contains("douyin.com")) {
+                linkInput.setText(url)
+                showTab(0)
+                analyze()
+            } else {
+                webLinkInput.setText(url)
+                showTab(1)
+                sniffWeb()
+            }
         }
     }
 
@@ -279,14 +325,36 @@ class MainActivity : AppCompatActivity() {
         return m?.value?.trimEnd('.', ',', ')', ']', '"', '\'')
     }
 
-    private fun showTab(download: Boolean) {
-        mainPanel.visibility = if (download) View.VISIBLE else View.GONE
-        historyPanel.visibility = if (download) View.GONE else View.VISIBLE
-        tabDownloadBtn.background = roundedBg(if (download) accent else bgBtn)
-        tabDownloadBtn.setTextColor(if (download) Color.BLACK else Color.WHITE)
-        tabHistoryBtn.background = roundedBg(if (download) bgBtn else accent)
-        tabHistoryBtn.setTextColor(if (download) Color.WHITE else Color.BLACK)
-        if (!download) renderHistory()
+    private fun styleTab(b: Button, active: Boolean) {
+        b.background = roundedBg(if (active) accent else bgBtn)
+        b.setTextColor(if (active) Color.BLACK else Color.WHITE)
+    }
+
+    private fun pasteWebFromClipboard() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clip: ClipData? = cm.primaryClip
+        if (clip != null && clip.itemCount > 0) {
+            val t = clip.getItemAt(0).coerceToText(this)?.toString() ?: ""
+            val url = extractUrl(t)
+            if (url != null) {
+                webLinkInput.setText(url)
+                webStatusLabel.text = "Đã dán link. Bấm Tìm video."
+            } else {
+                webStatusLabel.text = "Trong khay nhớ không có link nào."
+            }
+        } else {
+            webStatusLabel.text = "Khay nhớ đang trống."
+        }
+    }
+
+    private fun showTab(index: Int) {
+        mainPanel.visibility = if (index == 0) View.VISIBLE else View.GONE
+        webPanel.visibility = if (index == 1) View.VISIBLE else View.GONE
+        historyPanel.visibility = if (index == 2) View.VISIBLE else View.GONE
+        styleTab(tabDownloadBtn, index == 0)
+        styleTab(tabWebBtn, index == 1)
+        styleTab(tabHistoryBtn, index == 2)
+        if (index == 2) renderHistory()
     }
 
     private fun pasteFromClipboard() {
@@ -689,16 +757,313 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ---------- Download queue: up to 3 files at once ----------
-    private fun download(v: Variant) {
-        if (accelOn && workerUrl.isEmpty()) {
-            Toast.makeText(this, "Nút tăng tốc đang bật nhưng chưa có địa chỉ máy chủ — tắt nút hoặc triển khai Worker trước nhé", Toast.LENGTH_LONG).show()
+    // ---------- Universal web video sniffer (kiểu Cốc Cốc) ----------
+    private fun resolveUrl(base: String, rel: String): String {
+        return try {
+            var r = rel.trim()
+            if (r.startsWith("//")) r = "https:" + r
+            URL(URL(base), r).toString()
+        } catch (e: Exception) { rel }
+    }
+
+    private fun fetchWebPage(url: String): Triple<String, String, String> {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.setRequestProperty("User-Agent", uaString)
+        conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        conn.setRequestProperty("Accept-Language", "vi,en;q=0.8")
+        conn.connectTimeout = 20000
+        conn.readTimeout = 40000
+        conn.instanceFollowRedirects = true
+        val code = conn.responseCode
+        val ct = conn.contentType ?: ""
+        val finalUrl = conn.url.toString()
+        val html = if (code in 200..299 && !ct.startsWith("video/") && (ct.contains("html") || ct.isEmpty())) {
+            conn.inputStream.bufferedReader().use { it.readText() }.take(2000000)
+        } else ""
+        conn.disconnect()
+        if (code !in 200..299) throw RuntimeException("Trang web trả lỗi $code")
+        return Triple(finalUrl, html, ct)
+    }
+
+    private fun extractWebTitle(html: String): String {
+        if (html.isEmpty()) return ""
+        var t = Regex("<meta[^>]+property\\s*=\\s*[\"']og:title[\"'][^>]+content\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+            .find(html)?.groupValues?.get(1) ?: ""
+        if (t.isEmpty()) {
+            t = Regex("<title[^>]*>([^<]+)</title>", RegexOption.IGNORE_CASE).find(html)?.groupValues?.get(1) ?: ""
+        }
+        return t.trim().take(100)
+    }
+
+    private fun probeFile(url: String): Pair<String, Long> {
+        return try {
+            val conn = URL(url).openConnection() as HttpURLConnection
+            conn.requestMethod = "HEAD"
+            conn.setRequestProperty("User-Agent", uaString)
+            conn.connectTimeout = 15000
+            conn.readTimeout = 15000
+            conn.instanceFollowRedirects = true
+            val ct = conn.contentType ?: ""
+            val len = conn.contentLengthLong
+            conn.disconnect()
+            Pair(ct, len)
+        } catch (e: Exception) { Pair("", 0L) }
+    }
+
+    private fun httpGetWithReferer(url: String, referer: String): String {
+        val conn = openConn(url, null, referer)
+        val code = conn.responseCode
+        val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+            ?.bufferedReader()?.use { it.readText() } ?: ""
+        conn.disconnect()
+        if (code !in 200..299) throw RuntimeException("Máy chủ trả lỗi $code")
+        return text
+    }
+
+    private fun parseM3u8Variants(playlistUrl: String, referer: String): List<Variant> {
+        val text = httpGetWithReferer(playlistUrl, referer)
+        val lines = text.lines()
+        val out = mutableListOf<Variant>()
+        if (lines.any { it.startsWith("#EXT-X-STREAM-INF") }) {
+            var pendingRes = ""
+            for (line in lines) {
+                when {
+                    line.startsWith("#EXT-X-STREAM-INF") -> {
+                        pendingRes = Regex("RESOLUTION=\\d+x(\\d+)").find(line)?.groupValues?.get(1) ?: ""
+                    }
+                    line.isNotBlank() && !line.startsWith("#") -> {
+                        val u = resolveUrl(playlistUrl, line.trim())
+                        out.add(Variant(if (pendingRes.isNotEmpty()) "${pendingRes}p · HLS" else "HLS", u, 0L, false, "hls"))
+                        pendingRes = ""
+                    }
+                }
+            }
+        } else if (lines.any { it.startsWith("#EXTM3U") }) {
+            out.add(Variant("HLS", playlistUrl, 0L, false, "hls"))
+        }
+        return out
+    }
+
+    // Trả về (tiêu đề, url trang cuối, danh sách bản)
+    private fun sniffWebPage(pageUrl: String): Triple<String, String, List<Variant>> {
+        val low = pageUrl.lowercase()
+        if (low.contains("youtube.com/watch") || low.contains("youtu.be/") || low.contains("youtube.com/shorts") || low.contains("youtube.com/embed/"))
+            throw RuntimeException("YouTube chưa được hỗ trợ ở bản này — anh dùng Cốc Cốc hoặc app chuyên tải YouTube nhé.")
+        val (finalUrl, html, contentType) = fetchWebPage(pageUrl)
+        val title = extractWebTitle(html).ifEmpty { finalUrl }
+        val cands = LinkedHashSet<String>()
+        val lowFinal = finalUrl.lowercase()
+        if (Regex("\\.(mp4|webm|mov)(\\?|$)").containsMatchIn(lowFinal) || contentType.startsWith("video/")) {
+            cands.add(finalUrl)
+        }
+        if (html.isNotEmpty()) {
+            Regex("<(?:video|source)[^>]+src\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                .findAll(html).forEach { cands.add(it.groupValues[1]) }
+            Regex("<meta[^>]+property\\s*=\\s*[\"'](?:og:video(?::secure_url|:url)?|twitter:player:stream)[\"'][^>]+content\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                .findAll(html).forEach { cands.add(it.groupValues[1]) }
+            Regex("<meta[^>]+content\\s*=\\s*[\"']([^\"']+)[\"'][^>]+property\\s*=\\s*[\"'](?:og:video(?::secure_url|:url)?|twitter:player:stream)[\"']", RegexOption.IGNORE_CASE)
+                .findAll(html).forEach { cands.add(it.groupValues[1]) }
+            Regex("\"contentUrl\"\\s*:\\s*\"([^\"]+)\"", RegexOption.IGNORE_CASE)
+                .findAll(html).forEach { cands.add(unescapeJson(it.groupValues[1])) }
+            Regex("https?://[^\\s\"'<>]+\\.(?:mp4|webm|mov|m3u8|mpd)(?:\\?[^\\s\"'<>]*)?", RegexOption.IGNORE_CASE)
+                .findAll(html).forEach { cands.add(it.value) }
+        }
+        val list = mutableListOf<Variant>()
+        var dashSkipped = 0
+        for (rawU in cands.take(25)) {
+            val u = resolveUrl(finalUrl, rawU).trim('\'', '"')
+            if (u.isEmpty() || u.startsWith("blob:") || u.startsWith("data:")) continue
+            val lu = u.lowercase()
+            try {
+                when {
+                    ".m3u8" in lu -> list.addAll(parseM3u8Variants(u, finalUrl))
+                    ".mpd" in lu -> dashSkipped++
+                    else -> {
+                        val (ct, len) = probeFile(u)
+                        if (ct.startsWith("video/") || Regex("\\.(mp4|webm|mov)(\\?|$)").containsMatchIn(lu)) {
+                            val ext = Regex("\\.(mp4|webm|mov)").find(lu)?.groupValues?.get(1)?.uppercase() ?: "VIDEO"
+                            val q = if (len > 0) "$ext · ${fmtSize(len)}" else "$ext · không rõ dung lượng"
+                            list.add(Variant(q, u, len, false, "file"))
+                        }
+                    }
+                }
+            } catch (e: Exception) { }
+        }
+        val seen = HashSet<String>()
+        val deduped = list.filter { seen.add(it.url) }
+            .sortedWith(compareByDescending<Variant> { if (it.kind == "file") 1 else 0 }.thenByDescending { it.size })
+        if (deduped.isEmpty() && dashSkipped > 0)
+            throw RuntimeException("Trang này chỉ có luồng DASH (chưa hỗ trợ ở bản này).")
+        return Triple(title, finalUrl, deduped)
+    }
+
+    private fun sniffWeb() {
+        val url = extractUrl(webLinkInput.text.toString())
+        if (url == null) {
+            webStatusLabel.text = "Chưa có link hợp lệ. Anh dán link trang web vào trước nhé."
             return
         }
-        val job = DownloadJob(nextJobId++, currentTitle.ifEmpty { "video" }, v)
+        webStatusLabel.text = "Đang đọc trang web…"
+        webVariantsBox.removeAllViews()
+        Thread {
+            try {
+                val (title, pageUrl, list) = sniffWebPage(url)
+                webTitle = title
+                webPageUrl = pageUrl
+                webVariants = list
+                runOnUiThread {
+                    if (list.isEmpty()) {
+                        webStatusLabel.text = "Không tìm thấy video nào trong trang này. (Trang kiểu app/chặn bot có thể không bóc được.)"
+                    } else {
+                        webStatusLabel.text = "Tìm thấy ${list.size} video/luồng trong trang \"$title\". Bấm Tải ở mục muốn lấy:"
+                        renderWebVariants()
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread { webStatusLabel.text = "Lỗi: ${e.message}" }
+            }
+        }.start()
+    }
+
+    private fun renderWebVariants() {
+        webVariantsBox.removeAllViews()
+        webVariantsBox.addView(label("Các video/luồng tìm được (bấm Tải ở mục muốn lấy):"))
+        for (v in webVariants) {
+            val name = if (v.kind == "hls") "📡 ${v.quality.uppercase()}" else "🎬 ${v.quality.uppercase()}"
+            val b = btn("$name — Tải", -1) { downloadWeb(v) }
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            lp.setMargins(0, dp(3), 0, dp(3))
+            webVariantsBox.addView(b, lp)
+        }
+    }
+
+    // ---------- Tải luồng HLS (m3u8): tải từng đoạn rồi nối lại ----------
+    private fun hlsDownload(playlistUrl: String, dest: File, job: DownloadJob): Boolean {
+        return try {
+            val referer = job.referer.ifEmpty { "https://www.douyin.com/" }
+            var mediaPlaylistUrl = playlistUrl
+            var text = httpGetWithReferer(playlistUrl, referer)
+            var lines = text.lines()
+            if (lines.any { it.startsWith("#EXT-X-STREAM-INF") }) {
+                var bestUrl = ""
+                var bestBw = -1L
+                var bw = 0L
+                for (line in lines) {
+                    if (line.startsWith("#EXT-X-STREAM-INF")) {
+                        bw = Regex("BANDWIDTH=(\\d+)").find(line)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                    } else if (line.isNotBlank() && !line.startsWith("#")) {
+                        if (bw >= bestBw) {
+                            bestBw = bw
+                            bestUrl = resolveUrl(playlistUrl, line.trim())
+                        }
+                        bw = 0L
+                    }
+                }
+                if (bestUrl.isEmpty()) return false
+                mediaPlaylistUrl = bestUrl
+                text = httpGetWithReferer(bestUrl, referer)
+                lines = text.lines()
+            }
+            if (lines.any { it.startsWith("#EXT-X-KEY") && !it.contains("METHOD=NONE") }) {
+                setJobState(job, "❌ Luồng mã hoá, bản này chưa hỗ trợ.")
+                return false
+            }
+            val segUrls = lines.filter { it.isNotBlank() && !it.startsWith("#") }
+                .map { resolveUrl(mediaPlaylistUrl, it.trim()) }
+            if (segUrls.isEmpty()) return false
+            val partFiles = arrayOfNulls<File>(segUrls.size)
+            val totalBytes = AtomicLong(0)
+            val totalEst = AtomicLong(0)
+            val errors = AtomicInteger(0)
+            job.total = -1
+            job.done = 0
+            val threads = mutableListOf<Thread>()
+            for (t in 0 until 4) {
+                threads += Thread {
+                    var i = t
+                    while (i < segUrls.size) {
+                        try {
+                            val conn = openConn(proxied(segUrls[i]), null, referer)
+                            if (conn.responseCode !in 200..299) {
+                                errors.incrementAndGet()
+                                conn.disconnect()
+                                i += 4
+                                continue
+                            }
+                            val len = conn.contentLengthLong
+                            if (len > 0) {
+                                totalEst.addAndGet(len)
+                                job.total = totalEst.get()
+                            }
+                            val part = File(cacheDir, "hls_${job.id}_$i.ts")
+                            conn.inputStream.use { input ->
+                                FileOutputStream(part).use { out ->
+                                    val buf = ByteArray(256 * 1024)
+                                    while (true) {
+                                        val n = input.read(buf)
+                                        if (n < 0) break
+                                        out.write(buf, 0, n)
+                                        val d = totalBytes.addAndGet(n.toLong())
+                                        job.done = d
+                                        updateJobProgress(job)
+                                    }
+                                }
+                            }
+                            conn.disconnect()
+                            partFiles[i] = part
+                        } catch (e: Exception) {
+                            errors.incrementAndGet()
+                        }
+                        i += 4
+                    }
+                }
+            }
+            threads.forEach { it.start() }
+            threads.forEach { it.join() }
+            var ok = errors.get() == 0
+            for (i in segUrls.indices) {
+                if (partFiles[i] == null || !partFiles[i]!!.exists()) { ok = false; break }
+            }
+            if (!ok) {
+                for (f in partFiles) { try { f?.delete() } catch (e: Exception) { } }
+                return false
+            }
+            FileOutputStream(dest).use { out ->
+                for (i in segUrls.indices) {
+                    partFiles[i]!!.inputStream().use { it.copyTo(out) }
+                    partFiles[i]!!.delete()
+                }
+            }
+            job.done = totalBytes.get()
+            job.total = totalBytes.get()
+            updateJobProgress(job)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    // ---------- Download queue: up to 3 files at once ----------
+    private fun download(v: Variant) {
+        enqueueDownload(v, currentTitle.ifEmpty { "video" }, variants, "")
+    }
+
+    private fun downloadWeb(v: Variant) {
+        if (enqueueDownload(v, webTitle.ifEmpty { "video" }, webVariants, webPageUrl)) {
+            Toast.makeText(this, "Đã thêm vào hàng đợi. Qua tab Tải video để xem tiến trình nhé.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun enqueueDownload(v: Variant, title: String, source: List<Variant>, referer: String): Boolean {
+        if (accelOn && workerUrl.isEmpty()) {
+            Toast.makeText(this, "Nút tăng tốc đang bật nhưng chưa có địa chỉ máy chủ — tắt nút hoặc triển khai Worker trước nhé", Toast.LENGTH_LONG).show()
+            return false
+        }
+        val job = DownloadJob(nextJobId++, title, v, referer = referer, source = source)
         runOnUiThread { addJobRow(job) }
         synchronized(queueLock) { jobQueue.addLast(job) }
         processQueue()
+        return true
     }
 
     private fun addJobRow(job: DownloadJob) {
@@ -786,8 +1151,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun runJob(job: DownloadJob) {
-        val others = variants
-            .filter { it.url != job.variant.url && !it.isAudio && labelScore(it.quality) >= 0 }
+        val others = job.source
+            .filter { it.url != job.variant.url && !it.isAudio && it.kind == job.variant.kind && labelScore(it.quality) >= 0 }
             .sortedWith(compareByDescending<Variant> { labelScore(it.quality) }.thenByDescending { it.size })
         val candidates = listOf(job.variant) + others
         var ok = false
@@ -795,7 +1160,7 @@ class MainActivity : AppCompatActivity() {
             setJobState(job, "Đang tải bản ${cand.quality}…")
             val tmp = File(cacheDir, "dl_${job.id}.${if (cand.isAudio) "mp3" else "mp4"}")
             if (tmp.exists()) tmp.delete()
-            val success = segmentedDownload(proxied(cand.url), tmp, job)
+            val success = if (cand.kind == "hls") hlsDownload(proxied(cand.url), tmp, job) else segmentedDownload(proxied(cand.url), tmp, job)
             if (success) {
                 val saved = saveToMedia(tmp, cand)
                 tmp.delete()
@@ -817,10 +1182,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---------- Parallel segmented download (multi-connection) ----------
-    private fun openConn(url: String, range: String? = null): HttpURLConnection {
+    private fun openConn(url: String, range: String? = null, referer: String = "https://www.douyin.com/"): HttpURLConnection {
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.setRequestProperty("User-Agent", uaString)
-        conn.setRequestProperty("Referer", "https://www.douyin.com/")
+        conn.setRequestProperty("Referer", referer)
         if (range != null) conn.setRequestProperty("Range", range)
         conn.connectTimeout = 15000
         conn.readTimeout = 30000
@@ -830,7 +1195,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun downloadRange(url: String, start: Long, end: Long, dest: File, doneAtomic: AtomicLong, job: DownloadJob): Boolean {
         return try {
-            val conn = openConn(url, "bytes=$start-$end")
+            val conn = openConn(url, "bytes=$start-$end", job.referer.ifEmpty { "https://www.douyin.com/" })
             if (conn.responseCode != 206) return false
             conn.inputStream.use { input ->
                 RandomAccessFile(dest, "rw").use { raf ->
@@ -856,7 +1221,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun streamDownload(url: String, dest: File, job: DownloadJob): Boolean {
         return try {
-            val conn = openConn(url)
+            val conn = openConn(url, null, job.referer.ifEmpty { "https://www.douyin.com/" })
             if (conn.responseCode !in 200..299) return false
             job.total = conn.contentLengthLong
             conn.inputStream.use { input ->
@@ -882,7 +1247,7 @@ class MainActivity : AppCompatActivity() {
     private fun segmentedDownload(url: String, dest: File, job: DownloadJob): Boolean {
         var total = -1L
         try {
-            val probe = openConn(url, "bytes=0-0")
+            val probe = openConn(url, "bytes=0-0", job.referer.ifEmpty { "https://www.douyin.com/" })
             if (probe.responseCode == 206) {
                 val cr = probe.getHeaderField("Content-Range")
                 total = cr?.substringAfter('/')?.toLongOrNull() ?: -1
