@@ -844,6 +844,68 @@ class MainActivity : AppCompatActivity() {
         return out
     }
 
+    // ---------- Bắt link video bằng WebView rình request (kiểu Cốc Cốc) ----------
+    // Nạp trang nhúng video vào trình duyệt ẩn, rình mọi request mạng:
+    // khi trình phát xin file .m3u8/.mp4 là chộp lấy link thật. Không cần biết
+    // host mã hóa kiểu gì vì trình phát tự giải mã rồi xin link thay mình.
+    private class SniffState {
+        @Volatile var webView: WebView? = null
+        @Volatile var mediaUrl: String? = null
+    }
+
+    private val sniffNudgeJs = "(function(){try{var v=document.querySelector('video');" +
+        "if(v&&v.paused){v.muted=true;v.play().catch(function(){})}}catch(e){}})()"
+
+    private fun sniffEmbedViaWebView(embedUrl: String, referer: String): String? {
+        val state = SniffState()
+        runOnUiThread {
+            try {
+                val wv = WebView(this)
+                state.webView = wv
+                wv.settings.javaScriptEnabled = true
+                wv.settings.domStorageEnabled = true
+                wv.settings.mediaPlaybackRequiresUserGesture = false
+                wv.settings.userAgentString = uaString
+                wv.webViewClient = object : WebViewClient() {
+                    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                        try {
+                            val u = request.url.toString()
+                            if (state.mediaUrl == null) {
+                                val lu = u.lowercase()
+                                if (lu.contains(".m3u8") ||
+                                    (lu.contains(".mp4") && !lu.contains("poster") && !lu.contains("thumb") && !lu.contains("preview"))
+                                ) {
+                                    state.mediaUrl = u
+                                }
+                            }
+                        } catch (e: Exception) { }
+                        return null
+                    }
+                }
+                (linkInput.parent as? ViewGroup)?.addView(wv, 1, 1)
+                wv.loadUrl(embedUrl)
+            } catch (e: Exception) { }
+        }
+        val deadline = System.currentTimeMillis() + 25000
+        try {
+            while (System.currentTimeMillis() < deadline) {
+                if (state.mediaUrl != null) break
+                Thread.sleep(1500)
+                runOnUiThread {
+                    try { state.webView?.evaluateJavascript(sniffNudgeJs, null) } catch (e: Exception) { }
+                }
+            }
+        } catch (e: InterruptedException) { }
+        runOnUiThread {
+            try {
+                (state.webView?.parent as? ViewGroup)?.removeView(state.webView)
+                state.webView?.destroy()
+            } catch (e: Exception) { }
+            state.webView = null
+        }
+        return state.mediaUrl
+    }
+
     // Giải mã nhúng vixeo.io: trang nhúng giấu link m3u8 trong 1 chuỗi base64,
     // bên trong là JSON có trường "source" = các đoạn hex nối bằng |, giải hex rồi ĐẢO NGƯỢC chuỗi là ra link thật.
     private fun decodeVixeoEmbed(embedUrl: String, referer: String): String? {
@@ -927,6 +989,30 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             } catch (e: Exception) { }
+        }
+        // Dự phòng tổng quát: rình request bằng WebView (bắt được mọi host nhúng)
+        if (list.isEmpty() && html.isNotEmpty()) {
+            setStatus("Bóc thường không ra, đang mở trình phát để bắt link (mất khoảng 15-25 giây)…")
+            val iframeUrls2 = Regex("<iframe[^>]+src\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                .findAll(html).map { it.groupValues[1] }.distinct().take(2).toList()
+            for (f in iframeUrls2) {
+                val fu = resolveUrl(finalUrl, f)
+                if (fu.isEmpty() || fu == finalUrl) continue
+                val sniffed = sniffEmbedViaWebView(fu, finalUrl)
+                if (sniffed != null) {
+                    try {
+                        if (sniffed.lowercase().contains(".m3u8")) {
+                            list.addAll(parseM3u8Variants(sniffed, finalUrl))
+                        } else {
+                            val (ct, len) = probeFile(sniffed)
+                            val ext = Regex("\\.(mp4|webm|mov)").find(sniffed.lowercase())?.groupValues?.get(1)?.uppercase() ?: "VIDEO"
+                            val q = if (len > 0) "$ext · ${fmtSize(len)}" else ext
+                            list.add(Variant(q, sniffed, len, false, "file"))
+                        }
+                    } catch (e: Exception) { }
+                    if (list.isNotEmpty()) break
+                }
+            }
         }
         val seen = HashSet<String>()
         val deduped = list.filter { seen.add(it.url) }
