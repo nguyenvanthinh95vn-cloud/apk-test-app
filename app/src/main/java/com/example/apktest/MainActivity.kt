@@ -313,7 +313,7 @@ class MainActivity : AppCompatActivity() {
         channelNameInput.setPadding(dp(10), dp(10), dp(10), dp(10))
         setBox.addView(channelNameInput)
         channelInput = EditText(this)
-        channelInput.hint = "Dán link kênh (douyin.com/user/…) hoặc link 1 video của kênh"
+        channelInput.hint = "Dán link kênh (douyin.com/user/…) hoặc link 1 video của kênh — dán cả đoạn chữ Douyin copy ra cũng được"
         channelInput.setTextColor(Color.WHITE)
         channelInput.setHintTextColor(Color.rgb(150, 150, 155))
         channelInput.background = roundedBg(bgBtn, 10)
@@ -1598,7 +1598,15 @@ class MainActivity : AppCompatActivity() {
             val r = apiHttp("$douyinApiBase$path", method, body)
             code = r.first; text = r.second
         }
-        if (code !in 200..299) throw RuntimeException("Douyin API trả lỗi $code")
+        if (code !in 200..299) {
+            // API demo gioi han wait toi da 30 (gui wait=60 la tra 400 INVALID_PARAM);
+            // bao ro cho anh hieu thay vi hien so loi tho.
+            val detail = try {
+                JSONObject(text).optJSONObject("error")?.optString("message", "") ?: ""
+            } catch (e: Exception) { "" }
+            if (code == 400) throw RuntimeException("Douyin API không nhận link này (lỗi 400${if (detail.isNotEmpty()) ": $detail" else ""}). Anh dán link kênh douyin.com/user/… hoặc link 1 video của kênh nhé.")
+            throw RuntimeException("Douyin API trả lỗi $code")
+        }
         val root = JSONObject(text)
         if (!root.optBoolean("success", false)) throw RuntimeException(root.optJSONObject("error")?.optString("message") ?: "Douyin API lỗi")
         return root.optJSONObject("data") ?: throw RuntimeException("Douyin API không trả dữ liệu")
@@ -1606,7 +1614,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun douyinApiParse(shareUrl: String): JSONObject {
         val body = JSONObject().put("url", shareUrl).toString()
-        return douyinApiData("POST", "/api/v1/parse?wait=60", body)
+        return douyinApiData("POST", "/api/v1/parse?wait=30", body)
     }
 
     private fun apiStreamsToVariants(streams: JSONArray?): List<Variant> {
@@ -1645,7 +1653,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun fetchChannelPosts(secUid: String): List<Triple<String, Variant, Long>> {
         val enc = URLEncoder.encode(secUid, "UTF-8")
-        val data = douyinApiData("GET", "/api/v1/douyin/user/posts?sec_user_id=$enc&count=20&wait=60", null)
+        val data = douyinApiData("GET", "/api/v1/douyin/user/posts?sec_user_id=$enc&count=20&wait=30", null)
         val items = data.optJSONArray("items") ?: throw RuntimeException("Không có video nào")
         val out = mutableListOf<Triple<String, Variant, Long>>()
         for (i in 0 until items.length()) {
@@ -1681,16 +1689,69 @@ class MainActivity : AppCompatActivity() {
         getSharedPreferences("savego", Context.MODE_PRIVATE).edit().putString("douyin_api_channels", arr.toString()).apply()
     }
 
+    // Giai link rut gon (v.douyin.com/…) bang cach di theo redirect toi da 5 lan.
+    // Tra ve link cuoi cung, loi mang thi tra ve link goc de API tu xu ly.
+    private fun resolveShortLink(url: String): String {
+        var cur = url
+        try {
+            repeat(5) {
+                val conn = URL(cur).openConnection() as HttpURLConnection
+                conn.instanceFollowRedirects = false
+                conn.setRequestProperty("User-Agent", uaString)
+                conn.connectTimeout = 15000
+                conn.readTimeout = 15000
+                val code = conn.responseCode
+                val loc = conn.getHeaderField("Location") ?: ""
+                conn.disconnect()
+                if (code in 300..399 && loc.isNotEmpty()) {
+                    cur = try { URL(URL(cur), loc).toString() } catch (e: Exception) { loc }
+                } else {
+                    return cur
+                }
+            }
+        } catch (e: Exception) { }
+        return cur
+    }
+
+    // Nhan dien kenh tu bat ky dang dan nao anh hay dung:
+    // - ca doan chu Douyin copy ra ("TA的更多作品。 https://v.douyin.com/… 2@3.com :1pm")
+    //   -> chi lay URL dau tien trong doan, bo het chu xung quanh;
+    // - link rut gon v.douyin.com/… -> giai redirect ra link that;
+    // - link kenh douyin.com/user/MS4w… hoac iesdouyin.com/share/user/…;
+    // - link 1 video iesdouyin.com/share/video/<id>/ -> hoi API lay author.sec_uid.
+    // Tra ve (sec_uid, nickname). Luu y: API parse link KENH tra sec_uid o
+    // cap cao nhat cua data (khong phai trong "author" nhu link video).
     private fun resolveSecUid(input: String): Pair<String, String> {
-        val t = input.trim()
-        val m = Regex("MS4wLjAB[A-Za-z0-9_\\-]+").find(t)
-        if (m != null) return Pair(m.value, "")
-        if (t.contains("douyin.com")) {
-            val a = douyinApiParse(t).optJSONObject("author")
-            val sec = a?.optString("sec_uid", "") ?: ""
-            if (sec.isNotEmpty()) return Pair(sec, a?.optString("nickname", "") ?: "")
+        val url = extractUrl(input)
+            ?: throw RuntimeException("Không thấy link trong đoạn anh dán. Anh dán link kênh douyin.com/user/… hoặc link 1 video của kênh nhé.")
+        if (!url.contains("douyin.com")) {
+            throw RuntimeException("Link này không phải link Douyin. Anh dán link kênh douyin.com/user/… hoặc link 1 video của kênh nhé.")
         }
-        throw RuntimeException("Không nhận ra link kênh. Dán link kênh dạng douyin.com/user/… hoặc link 1 video của kênh đó.")
+        val resolved = resolveShortLink(url)
+        // sec_uid co ngay trong link da giai (link kenh dang /user/MS4w…).
+        val m = Regex("MS4wLjAB[A-Za-z0-9_\\-]+").find(resolved)
+        if (m != null) {
+            var nick = ""
+            try {
+                val d = douyinApiParse(resolved)
+                nick = d.optString("nickname", "")
+                if (nick.isEmpty()) nick = d.optJSONObject("author")?.optString("nickname", "") ?: ""
+            } catch (e: Exception) { }
+            return Pair(m.value, nick)
+        }
+        // Con lai: link video hoac link kenh khong co sec_uid trong URL ->
+        // hoi API parse, doc sec_uid o ca 2 cho co the co.
+        val data = douyinApiParse(resolved)
+        val sec = data.optString("sec_uid", "").ifEmpty {
+            data.optJSONObject("author")?.optString("sec_uid", "") ?: ""
+        }
+        if (sec.isNotEmpty()) {
+            val nick = data.optString("nickname", "").ifEmpty {
+                data.optJSONObject("author")?.optString("nickname", "") ?: ""
+            }
+            return Pair(sec, nick)
+        }
+        throw RuntimeException("Không nhận ra kênh từ link này. Anh dán link kênh dạng douyin.com/user/… hoặc link 1 video của kênh đó.")
     }
 
     private fun updateApiToggleBtn() {
