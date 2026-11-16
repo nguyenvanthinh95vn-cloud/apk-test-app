@@ -26,6 +26,7 @@ import android.webkit.WebResourceError
 import android.webkit.JavascriptInterface
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -49,6 +50,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 data class Variant(val quality: String, val url: String, val size: Long, val isAudio: Boolean, val kind: String = "file")
+data class ChannelVideo(val title: String, val variant: Variant, val dur: Long, val cover: String)
 data class DownloadJob(
     val id: Long,
     val title: String,
@@ -100,6 +102,12 @@ class MainActivity : AppCompatActivity() {
     private var douyinApiOn = false
     private var apiLoggedIn = false
     private val douyinApiBase = "https://demo.douyin.wtf"
+    // Ket qua quet kenh (phan trang 20 video/trang) + video da tick chon (giu khi doi trang).
+    private var channelScanItems: List<ChannelVideo> = emptyList()
+    private var channelScanPage = 0
+    private var channelScanName = ""
+    private val selectedChannelVideos = LinkedHashSet<ChannelVideo>()
+    private var downloadSelectedBtn: Button? = null
 
     private var variants: List<Variant> = emptyList()
     private var currentTitle: String = ""
@@ -1651,19 +1659,34 @@ class MainActivity : AppCompatActivity() {
         return Triple(title, thumb, list)
     }
 
-    private fun fetchChannelPosts(secUid: String): List<Triple<String, Variant, Long>> {
+    // 1 trang video cua kenh: tra ve (danh sach video, cursor trang sau, con trang sau khong).
+    // Cover: media.covers[0].url (anh 323:430), du phong cac cover sau.
+    private fun fetchChannelPostsPage(secUid: String, cursor: Long): Triple<List<ChannelVideo>, Long, Boolean> {
         val enc = URLEncoder.encode(secUid, "UTF-8")
-        val data = douyinApiData("GET", "/api/v1/douyin/user/posts?sec_user_id=$enc&count=20&wait=30", null)
+        val cur = if (cursor > 0) "&cursor=$cursor" else ""
+        val data = douyinApiData("GET", "/api/v1/douyin/user/posts?sec_user_id=$enc&count=20&wait=30$cur", null)
         val items = data.optJSONArray("items") ?: throw RuntimeException("Không có video nào")
-        val out = mutableListOf<Triple<String, Variant, Long>>()
+        val out = mutableListOf<ChannelVideo>()
         for (i in 0 until items.length()) {
             val it = items.optJSONObject(i) ?: continue
             val title = it.optString("title", "video").ifEmpty { "video" }
             val dur = it.optLong("duration_ms", 0L)
-            val best = apiStreamsToVariants(it.optJSONObject("media")?.optJSONArray("streams")).firstOrNull() ?: continue
-            out.add(Triple(title, best, dur))
+            val media = it.optJSONObject("media")
+            val covers = media?.optJSONArray("covers")
+            var cover = ""
+            if (covers != null) {
+                for (j in 0 until covers.length()) {
+                    val u = covers.optJSONObject(j)?.optString("url", "") ?: ""
+                    if (u.isNotEmpty()) { cover = u; break }
+                }
+            }
+            val best = apiStreamsToVariants(media?.optJSONArray("streams")).firstOrNull() ?: continue
+            out.add(ChannelVideo(title, best, dur, cover))
         }
-        return out
+        var nextCursor = data.optLong("cursor", 0L)
+        if (nextCursor == 0L) nextCursor = data.optString("cursor", "").toLongOrNull() ?: 0L
+        val hasMore = data.optBoolean("has_more", nextCursor > 0)
+        return Triple(out, nextCursor, hasMore)
     }
 
     private fun loadChannels(): MutableList<Pair<String, String>> {
@@ -1785,12 +1808,20 @@ class MainActivity : AppCompatActivity() {
             return
         }
         for ((name, sec) in list) {
+            val box = LinearLayout(this)
+            box.orientation = LinearLayout.VERTICAL
+            box.background = roundedBg(bgPanel, 10)
+            box.setPadding(dp(8), dp(6), dp(8), dp(6))
+            val boxLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            boxLp.setMargins(0, dp(3), 0, dp(3))
             val tv = label("• $name", 13f)
             tv.setTextColor(Color.WHITE)
-            channelBox.addView(row(tv, btn("Lấy video mới") { fetchChannel(sec, name) }, btn("Xoá") {
+            box.addView(row(tv, btn("Xoá") {
                 saveChannels(loadChannels().filter { it.second != sec })
                 renderChannelList()
             }))
+            box.addView(row(btn("Lấy video mới") { fetchChannel(sec, name, false) }, btn("🔍 Quét cả kênh") { fetchChannel(sec, name, true) }))
+            channelBox.addView(box, boxLp)
         }
     }
 
@@ -1824,39 +1855,166 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun fetchChannel(secUid: String, name: String) {
+    // Lay video kenh: scanAll=false = 20 video moi nhat; scanAll=true = quet ca kenh
+    // theo cursor (20 video/trang, toi da 200 video/lan, nghi 1,5 giay giua cac trang
+    // de khoi vuot gioi han demo API 30 request/10 giay). Ket qua hien phan trang
+    // 20 video/trang, khong do ca kenh vao 1 danh sach dai.
+    private fun fetchChannel(secUid: String, name: String, scanAll: Boolean) {
         if (!douyinApiOn) {
             Toast.makeText(this, "Bật công tắc Douyin API ở trên trước đã nhé", Toast.LENGTH_LONG).show()
             return
         }
-        apiStatusLabel.text = "Đang lấy video mới của $name…"
+        apiStatusLabel.text = if (scanAll) "Đang quét cả kênh $name (20 video/trang, đi chậm để khỏi bị API chặn)…" else "Đang lấy video mới của $name…"
         channelVideosBox.removeAllViews()
+        selectedChannelVideos.clear()
         Thread {
             try {
-                val items = fetchChannelPosts(secUid)
+                val all = mutableListOf<ChannelVideo>()
+                var cursor = 0L
+                var page = 0
+                var stoppedReason = ""
+                while (true) {
+                    val (items, next, hasMore) = try {
+                        fetchChannelPostsPage(secUid, cursor)
+                    } catch (e: Exception) {
+                        // Quet ca kenh: demo API doi khi chan trang sau (can identity dang nhap);
+                        // giu lai video da lay duoc thay vi mat het.
+                        if (all.isNotEmpty()) { stoppedReason = e.message ?: "API lỗi"; break } else throw e
+                    }
+                    for (v in items) if (all.none { it.variant.url == v.variant.url }) all.add(v)
+                    page++
+                    if (!scanAll) break
+                    if (!hasMore || next <= 0L || next == cursor) break
+                    if (all.size >= 200) { stoppedReason = "Đã lấy đủ 200 video (giới hạn quét 1 lần)."; break }
+                    cursor = next
+                    val got = all.size
+                    runOnUiThread { apiStatusLabel.text = "Đang quét cả kênh $name… đã có $got video (trang $page)." }
+                    Thread.sleep(1500)
+                }
                 runOnUiThread {
-                    if (items.isEmpty()) {
+                    if (all.isEmpty()) {
                         apiStatusLabel.text = "Kênh $name không có video nào."
                         return@runOnUiThread
                     }
-                    apiStatusLabel.text = "Kênh $name: ${items.size} video mới nhất. Bấm Tải ở video muốn lấy (lưu về Phim/SaveGo):"
-                    for ((title, v, dur) in items) {
-                        val mm = dur / 60000
-                        val ss = (dur % 60000) / 1000
-                        val b = btn("🎬 ${title.take(50)} · $mm:${String.format("%02d", ss)} — Tải", -1) {
-                            if (enqueueDownload(v, title, listOf(v), "https://www.douyin.com/")) {
-                                Toast.makeText(this, "Đã thêm vào hàng đợi. Qua tab Tải video để xem tiến trình.", Toast.LENGTH_LONG).show()
-                            }
-                        }
-                        val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                        lp.setMargins(0, dp(3), 0, dp(3))
-                        channelVideosBox.addView(b, lp)
-                    }
+                    channelScanItems = all
+                    channelScanName = name
+                    channelScanPage = 0
+                    var msg = "Kênh $name: ${all.size} video" + if (scanAll) " (đã quét cả kênh)." else " mới nhất."
+                    msg += " Bấm Tải ở video muốn lấy (lưu về Phim/SaveGo), hoặc tick chọn rồi bấm Tải các video đã chọn."
+                    if (stoppedReason.isNotEmpty()) msg += " Lưu ý: dừng quét giữa chừng — $stoppedReason"
+                    apiStatusLabel.text = msg
+                    renderChannelVideosPage()
                 }
             } catch (e: Exception) {
                 runOnUiThread { apiStatusLabel.text = "Lỗi lấy video của $name: ${e.message}" }
             }
         }.start()
+    }
+
+    private fun channelScanPageCount(): Int = maxOf(1, (channelScanItems.size + 19) / 20)
+
+    private fun updateDownloadSelectedBtn() {
+        downloadSelectedBtn?.text = "⬇ Tải các video đã chọn (${selectedChannelVideos.size})"
+    }
+
+    private fun downloadSelectedChannelVideos() {
+        if (selectedChannelVideos.isEmpty()) {
+            Toast.makeText(this, "Anh tick chọn video trước đã nhé", Toast.LENGTH_SHORT).show()
+            return
+        }
+        var n = 0
+        for (item in selectedChannelVideos.toList()) {
+            if (enqueueDownload(item.variant, item.title, listOf(item.variant), "https://www.douyin.com/")) n++
+        }
+        selectedChannelVideos.clear()
+        updateDownloadSelectedBtn()
+        renderChannelVideosPage()
+        Toast.makeText(this, "Đã thêm $n video vào hàng đợi. Qua tab Tải video để xem tiến trình.", Toast.LENGTH_LONG).show()
+    }
+
+    // Tai anh dai dien nho (cover cua API) vao ImageView, khong chan giao dien.
+    private fun loadChannelThumb(iv: ImageView, url: String) {
+        iv.tag = url
+        Thread {
+            try {
+                val conn = URL(url).openConnection() as HttpURLConnection
+                conn.setRequestProperty("User-Agent", uaString)
+                conn.connectTimeout = 15000
+                conn.readTimeout = 15000
+                val bmp = conn.inputStream.use { BitmapFactory.decodeStream(it) }
+                conn.disconnect()
+                if (bmp != null) runOnUiThread { if (iv.tag == url) iv.setImageBitmap(bmp) }
+            } catch (e: Exception) { }
+        }.start()
+    }
+
+    // Ve 1 trang ket qua quet kenh: 20 video/trang, co nut chuyen trang tren + duoi.
+    // Moi video: nut Tai rieng, ben duoi la anh vuong nho 96dp + o tick chon.
+    // Tick chon giu nguyen khi doi trang (luu trong selectedChannelVideos).
+    private fun renderChannelVideosPage() {
+        if (!::channelVideosBox.isInitialized) return
+        channelVideosBox.removeAllViews()
+        val total = channelScanItems.size
+        val pages = channelScanPageCount()
+        if (channelScanPage >= pages) channelScanPage = pages - 1
+        if (channelScanPage < 0) channelScanPage = 0
+        val pageLabel = label("Kênh $channelScanName: $total video · Trang ${channelScanPage + 1}/$pages", 13f)
+        pageLabel.setTextColor(Color.WHITE)
+        channelVideosBox.addView(pageLabel)
+        val navRow = {
+            row(
+                btn("← Trang trước") { if (channelScanPage > 0) { channelScanPage--; renderChannelVideosPage() } },
+                btn("Trang sau →") { if (channelScanPage < pages - 1) { channelScanPage++; renderChannelVideosPage() } }
+            )
+        }
+        channelVideosBox.addView(navRow())
+        downloadSelectedBtn = btn("⬇ Tải các video đã chọn (0)", accent) { downloadSelectedChannelVideos() }
+        val dlLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        dlLp.setMargins(0, dp(4), 0, dp(2))
+        channelVideosBox.addView(downloadSelectedBtn, dlLp)
+        updateDownloadSelectedBtn()
+        val start = channelScanPage * 20
+        val end = minOf(start + 20, total)
+        for (idx in start until end) {
+            val item = channelScanItems[idx]
+            val mm = item.dur / 60000
+            val ss = (item.dur % 60000) / 1000
+            val itemBox = LinearLayout(this)
+            itemBox.orientation = LinearLayout.VERTICAL
+            itemBox.background = roundedBg(bgPanel, 10)
+            itemBox.setPadding(dp(8), dp(6), dp(8), dp(6))
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            lp.setMargins(0, dp(3), 0, dp(3))
+            val b = btn("🎬 ${item.title.take(50)} · $mm:${String.format("%02d", ss)} — Tải", -1) {
+                if (enqueueDownload(item.variant, item.title, listOf(item.variant), "https://www.douyin.com/")) {
+                    Toast.makeText(this, "Đã thêm vào hàng đợi. Qua tab Tải video để xem tiến trình.", Toast.LENGTH_LONG).show()
+                }
+            }
+            itemBox.addView(b)
+            val subRow = LinearLayout(this)
+            subRow.orientation = LinearLayout.HORIZONTAL
+            val thumb = ImageView(this)
+            thumb.scaleType = ImageView.ScaleType.CENTER_CROP
+            thumb.background = roundedBg(bgBtn, 8)
+            val thLp = LinearLayout.LayoutParams(dp(96), dp(96))
+            thLp.setMargins(0, dp(6), dp(8), 0)
+            thumb.layoutParams = thLp
+            subRow.addView(thumb)
+            if (item.cover.isNotEmpty()) loadChannelThumb(thumb, item.cover)
+            val cb = CheckBox(this)
+            cb.text = "Chọn video này"
+            cb.setTextColor(Color.rgb(215, 215, 220))
+            cb.textSize = 13f
+            cb.isChecked = selectedChannelVideos.contains(item)
+            cb.setOnCheckedChangeListener { _, checked ->
+                if (checked) selectedChannelVideos.add(item) else selectedChannelVideos.remove(item)
+                updateDownloadSelectedBtn()
+            }
+            subRow.addView(cb)
+            itemBox.addView(subRow)
+            channelVideosBox.addView(itemBox, lp)
+        }
+        channelVideosBox.addView(navRow())
     }
 
     private fun renderHistory() {
