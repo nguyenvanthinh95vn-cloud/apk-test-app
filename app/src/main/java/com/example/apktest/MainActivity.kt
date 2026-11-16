@@ -42,6 +42,9 @@ import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.net.CookieHandler
+import java.net.CookieManager
+import java.net.CookiePolicy
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -86,6 +89,17 @@ class MainActivity : AppCompatActivity() {
     private var webTitle: String = ""
     private var webPageUrl: String = ""
     private var webVariants: List<Variant> = emptyList()
+    private lateinit var tabSettingsBtn: Button
+    private lateinit var settingsPanel: View
+    private lateinit var apiToggleBtn: Button
+    private lateinit var apiStatusLabel: TextView
+    private lateinit var channelInput: EditText
+    private lateinit var channelNameInput: EditText
+    private lateinit var channelBox: LinearLayout
+    private lateinit var channelVideosBox: LinearLayout
+    private var douyinApiOn = false
+    private var apiLoggedIn = false
+    private val douyinApiBase = "https://demo.douyin.wtf"
 
     private var variants: List<Variant> = emptyList()
     private var currentTitle: String = ""
@@ -196,7 +210,8 @@ class MainActivity : AppCompatActivity() {
         tabDownloadBtn = btn("⬇  Tải video", accent) { showTab(0) }
         tabWebBtn = btn("🔗  Link web") { showTab(1) }
         tabHistoryBtn = btn("🕘  Lịch sử") { showTab(2) }
-        val tabRow = row(tabDownloadBtn, tabWebBtn, tabHistoryBtn)
+        tabSettingsBtn = btn("⚙  Cài đặt") { showTab(3) }
+        val tabRow = row(tabDownloadBtn, tabWebBtn, tabHistoryBtn, tabSettingsBtn)
         tabRow.setPadding(dp(8), dp(2), dp(8), dp(2))
         root.addView(tabRow)
 
@@ -277,6 +292,49 @@ class MainActivity : AppCompatActivity() {
         webPanel = webScroll
         root.addView(webScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
+        // Settings panel: Douyin API (moi) — chuc nang rieng, mac dinh TAT.
+        // TAT = moi thu nhu cu (quet WebView + tube5s). BAT = quet link Douyin
+        // thu qua Douyin API truoc (ban khong logo), loi thi tu ve cach cu.
+        val setBox = LinearLayout(this)
+        setBox.orientation = LinearLayout.VERTICAL
+        setBox.setPadding(dp(12), dp(6), dp(12), dp(16))
+        setBox.addView(label("Cài đặt", 16f))
+        apiToggleBtn = btn("📡 Douyin API (mới): TẮT") { toggleDouyinApi() }
+        val apiLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        apiLp.setMargins(0, dp(4), 0, 0)
+        setBox.addView(apiToggleBtn, apiLp)
+        setBox.addView(label("BẬT: quét link Douyin bằng API của repo Douyin_TikTok_Download_API (bản không logo, lấy được cả danh sách video mới của 1 kênh). TẮT: dùng cách quét cũ như trước. API lỗi thì app tự về cách cũ, không mất video."))
+        setBox.addView(label("Kênh Douyin đã lưu (chỉ dùng khi bật Douyin API):"))
+        channelNameInput = EditText(this)
+        channelNameInput.hint = "Tên kênh, vd: 柚子食堂 (để trống thì lấy tên thật của kênh)"
+        channelNameInput.setTextColor(Color.WHITE)
+        channelNameInput.setHintTextColor(Color.rgb(150, 150, 155))
+        channelNameInput.background = roundedBg(bgBtn, 10)
+        channelNameInput.setPadding(dp(10), dp(10), dp(10), dp(10))
+        setBox.addView(channelNameInput)
+        channelInput = EditText(this)
+        channelInput.hint = "Dán link kênh (douyin.com/user/…) hoặc link 1 video của kênh"
+        channelInput.setTextColor(Color.WHITE)
+        channelInput.setHintTextColor(Color.rgb(150, 150, 155))
+        channelInput.background = roundedBg(bgBtn, 10)
+        channelInput.setPadding(dp(10), dp(10), dp(10), dp(10))
+        channelInput.maxLines = 3
+        setBox.addView(channelInput)
+        setBox.addView(row(btn("＋ Thêm kênh", accent) { addChannel() }))
+        channelBox = LinearLayout(this)
+        channelBox.orientation = LinearLayout.VERTICAL
+        setBox.addView(channelBox)
+        apiStatusLabel = label("Mẹo: lưu 4 kênh mukbang rồi bấm Lấy video mới, khỏi cần gửi link từng video nữa.")
+        setBox.addView(apiStatusLabel)
+        channelVideosBox = LinearLayout(this)
+        channelVideosBox.orientation = LinearLayout.VERTICAL
+        setBox.addView(channelVideosBox)
+        val setScroll = ScrollView(this)
+        setScroll.addView(setBox)
+        setScroll.visibility = View.GONE
+        settingsPanel = setScroll
+        root.addView(setScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
         // History panel
         val histBox = LinearLayout(this)
         histBox.orientation = LinearLayout.VERTICAL
@@ -295,8 +353,13 @@ class MainActivity : AppCompatActivity() {
         root.addView(histScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
         setContentView(root)
+        try {
+            if (CookieHandler.getDefault() == null) CookieHandler.setDefault(CookieManager(null, CookiePolicy.ACCEPT_ALL))
+        } catch (e: Exception) { }
         fetchRemoteConfig()
         renderHistory()
+        updateApiToggleBtn()
+        renderChannelList()
         handleIntent(intent)
     }
 
@@ -352,10 +415,13 @@ class MainActivity : AppCompatActivity() {
         mainPanel.visibility = if (index == 0) View.VISIBLE else View.GONE
         webPanel.visibility = if (index == 1) View.VISIBLE else View.GONE
         historyPanel.visibility = if (index == 2) View.VISIBLE else View.GONE
+        settingsPanel.visibility = if (index == 3) View.VISIBLE else View.GONE
         styleTab(tabDownloadBtn, index == 0)
         styleTab(tabWebBtn, index == 1)
         styleTab(tabHistoryBtn, index == 2)
+        styleTab(tabSettingsBtn, index == 3)
         if (index == 2) renderHistory()
+        if (index == 3) renderChannelList()
     }
 
     private fun pasteFromClipboard() {
@@ -383,6 +449,7 @@ class MainActivity : AppCompatActivity() {
     private fun fetchRemoteConfig() {
         val prefs = getSharedPreferences("savego", Context.MODE_PRIVATE)
         accelOn = prefs.getBoolean("accel_on", false)
+        douyinApiOn = prefs.getBoolean("douyin_api_on", false)
         workerUrl = prefs.getString("worker_url", "") ?: ""
         apiBase = prefs.getString("api_url", apiBase) ?: apiBase
         runOnUiThread { updateAccelBtn() }
@@ -703,8 +770,19 @@ class MainActivity : AppCompatActivity() {
         thumbView.visibility = View.GONE
         Thread {
             try {
-                // Cach 1: quet thang tu Douyin, khong can may chu trung gian
+                // Cach 0 (chi khi bat Douyin API trong Cai dat): hoi API truoc
+                // de lay ban khong logo; loi thi tu roi xuong cach cu ben duoi.
                 var directErr = ""
+                if (url.contains("douyin.com") && douyinApiOn) {
+                    try {
+                        val (t, th, l) = scanViaDouyinApi(url)
+                        showVariants(t, th, l)
+                        return@Thread
+                    } catch (e: Exception) {
+                        directErr = "API: ${e.message ?: "không rõ lỗi"}"
+                    }
+                }
+                // Cach 1: quet thang tu Douyin, khong can may chu trung gian
                 if (url.contains("douyin.com")) {
                     try {
                         val (t, l) = scanDouyinDirect(url)
@@ -1474,6 +1552,250 @@ class MainActivity : AppCompatActivity() {
             }
             prefs.edit().putString("history_json", newArr.toString()).apply()
         } catch (e: Exception) { }
+    }
+
+    // ---------- Douyin API (moi, trong Cai dat — mac dinh TAT) ----------
+    // Port kieu client tu repo Evil0ctal/Douyin_TikTok_Download_API v5:
+    // v5 goc can ky a_bogus + identity qua browser/server (Docker, Postgres,
+    // Redis) nen khong port thang sang dien thoai duoc; ban nay goi demo API
+    // cong khai cua chinh repo do (demo.douyin.wtf, tai khoan demo cong khai
+    // theo docs cua repo), chi doc, co gioi han request. Loi thi tu ve cach cu.
+    private fun apiHttp(url: String, method: String, body: String?): Pair<Int, String> {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.requestMethod = method
+        conn.setRequestProperty("User-Agent", uaString)
+        conn.connectTimeout = 20000
+        conn.readTimeout = 90000
+        conn.instanceFollowRedirects = true
+        if (body != null) {
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+        }
+        val code = conn.responseCode
+        val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
+        conn.disconnect()
+        return Pair(code, text)
+    }
+
+    private fun douyinApiLogin() {
+        val (code, text) = apiHttp("$douyinApiBase/api/v1/auth/login", "POST", "{\"username\":\"demo\",\"password\":\"kelp-kelp-delta-3690\"}")
+        if (code !in 200..299 || !JSONObject(text).optBoolean("success", false)) throw RuntimeException("Không đăng nhập được Douyin API demo ($code)")
+        apiLoggedIn = true
+    }
+
+    private fun douyinApiEnsureLogin() {
+        if (!apiLoggedIn) douyinApiLogin()
+    }
+
+    // Tra ve data cua 1 lan goi API (tu dang nhap lai 1 lan neu het phien).
+    private fun douyinApiData(method: String, path: String, body: String?): JSONObject {
+        douyinApiEnsureLogin()
+        var (code, text) = apiHttp("$douyinApiBase$path", method, body)
+        if (code == 401) {
+            apiLoggedIn = false
+            douyinApiLogin()
+            val r = apiHttp("$douyinApiBase$path", method, body)
+            code = r.first; text = r.second
+        }
+        if (code !in 200..299) throw RuntimeException("Douyin API trả lỗi $code")
+        val root = JSONObject(text)
+        if (!root.optBoolean("success", false)) throw RuntimeException(root.optJSONObject("error")?.optString("message") ?: "Douyin API lỗi")
+        return root.optJSONObject("data") ?: throw RuntimeException("Douyin API không trả dữ liệu")
+    }
+
+    private fun douyinApiParse(shareUrl: String): JSONObject {
+        val body = JSONObject().put("url", shareUrl).toString()
+        return douyinApiData("POST", "/api/v1/parse?wait=60", body)
+    }
+
+    private fun apiStreamsToVariants(streams: JSONArray?): List<Variant> {
+        val list = mutableListOf<Variant>()
+        if (streams == null) return list
+        for (i in 0 until streams.length()) {
+            val s = streams.optJSONObject(i) ?: continue
+            if (s.optBoolean("watermark", true)) continue
+            val u = s.optString("url", "")
+            if (u.isEmpty()) continue
+            val w = s.optInt("width", 0)
+            list.add(Variant(if (w > 0) "${w}p · API" else "Video · API", u, s.optLong("size_bytes", 0L), false, "file"))
+        }
+        return list.sortedByDescending { Regex("(\\d+)p").find(it.quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0 }
+    }
+
+    private fun scanViaDouyinApi(shareUrl: String): Triple<String, String, List<Variant>> {
+        setStatus("Đang hỏi Douyin API (bản không logo)…")
+        val data = douyinApiParse(shareUrl)
+        val title = data.optString("title", "video").ifEmpty { "video" }
+        val media = data.optJSONObject("media")
+        var thumb = ""
+        val covers = media?.optJSONArray("covers")
+        if (covers != null && covers.length() > 0) thumb = covers.optJSONObject(0)?.optString("url", "") ?: ""
+        var list = apiStreamsToVariants(media?.optJSONArray("streams"))
+        if (list.isEmpty()) {
+            val v = media?.optJSONObject("video")
+            val u = v?.optString("url", "") ?: ""
+            if (u.isNotEmpty() && v?.optBoolean("watermark", true) == false) {
+                list = listOf(Variant("Video · API", u, v.optLong("size_bytes", 0L), false, "file"))
+            }
+        }
+        if (list.isEmpty()) throw RuntimeException("Douyin API không trả bản video không logo")
+        return Triple(title, thumb, list)
+    }
+
+    private fun fetchChannelPosts(secUid: String): List<Triple<String, Variant, Long>> {
+        val enc = URLEncoder.encode(secUid, "UTF-8")
+        val data = douyinApiData("GET", "/api/v1/douyin/user/posts?sec_user_id=$enc&count=20&wait=60", null)
+        val items = data.optJSONArray("items") ?: throw RuntimeException("Không có video nào")
+        val out = mutableListOf<Triple<String, Variant, Long>>()
+        for (i in 0 until items.length()) {
+            val it = items.optJSONObject(i) ?: continue
+            val title = it.optString("title", "video").ifEmpty { "video" }
+            val dur = it.optLong("duration_ms", 0L)
+            val best = apiStreamsToVariants(it.optJSONObject("media")?.optJSONArray("streams")).firstOrNull() ?: continue
+            out.add(Triple(title, best, dur))
+        }
+        return out
+    }
+
+    private fun loadChannels(): MutableList<Pair<String, String>> {
+        val out = mutableListOf<Pair<String, String>>()
+        try {
+            val arr = JSONArray(getSharedPreferences("savego", Context.MODE_PRIVATE).getString("douyin_api_channels", "[]"))
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                out.add(Pair(o.optString("name"), o.optString("sec_uid")))
+            }
+        } catch (e: Exception) { }
+        return out
+    }
+
+    private fun saveChannels(list: List<Pair<String, String>>) {
+        val arr = JSONArray()
+        for ((n, s) in list) {
+            val o = JSONObject()
+            o.put("name", n)
+            o.put("sec_uid", s)
+            arr.put(o)
+        }
+        getSharedPreferences("savego", Context.MODE_PRIVATE).edit().putString("douyin_api_channels", arr.toString()).apply()
+    }
+
+    private fun resolveSecUid(input: String): Pair<String, String> {
+        val t = input.trim()
+        val m = Regex("MS4wLjAB[A-Za-z0-9_\\-]+").find(t)
+        if (m != null) return Pair(m.value, "")
+        if (t.contains("douyin.com")) {
+            val a = douyinApiParse(t).optJSONObject("author")
+            val sec = a?.optString("sec_uid", "") ?: ""
+            if (sec.isNotEmpty()) return Pair(sec, a?.optString("nickname", "") ?: "")
+        }
+        throw RuntimeException("Không nhận ra link kênh. Dán link kênh dạng douyin.com/user/… hoặc link 1 video của kênh đó.")
+    }
+
+    private fun updateApiToggleBtn() {
+        if (!::apiToggleBtn.isInitialized) return
+        if (douyinApiOn) {
+            apiToggleBtn.text = "📡 Douyin API (mới): BẬT"
+            apiToggleBtn.background = roundedBg(accent)
+            apiToggleBtn.setTextColor(Color.BLACK)
+            apiToggleBtn.setTypeface(null, Typeface.BOLD)
+        } else {
+            apiToggleBtn.text = "📡 Douyin API (mới): TẮT"
+            apiToggleBtn.background = roundedBg(bgBtn)
+            apiToggleBtn.setTextColor(Color.WHITE)
+            apiToggleBtn.setTypeface(null, Typeface.NORMAL)
+        }
+    }
+
+    private fun toggleDouyinApi() {
+        douyinApiOn = !douyinApiOn
+        getSharedPreferences("savego", Context.MODE_PRIVATE).edit().putBoolean("douyin_api_on", douyinApiOn).apply()
+        updateApiToggleBtn()
+        Toast.makeText(this, if (douyinApiOn) "Đã bật Douyin API — quét link Douyin sẽ thử API không logo trước, lỗi thì tự về cách cũ" else "Đã tắt Douyin API — dùng cách quét cũ như trước", Toast.LENGTH_LONG).show()
+    }
+
+    private fun renderChannelList() {
+        if (!::channelBox.isInitialized) return
+        channelBox.removeAllViews()
+        val list = loadChannels()
+        if (list.isEmpty()) {
+            channelBox.addView(label("Chưa lưu kênh nào. Dán link kênh ở trên rồi bấm Thêm kênh."))
+            return
+        }
+        for ((name, sec) in list) {
+            val tv = label("• $name", 13f)
+            tv.setTextColor(Color.WHITE)
+            channelBox.addView(row(tv, btn("Lấy video mới") { fetchChannel(sec, name) }, btn("Xoá") {
+                saveChannels(loadChannels().filter { it.second != sec })
+                renderChannelList()
+            }))
+        }
+    }
+
+    private fun addChannel() {
+        val input = channelInput.text.toString()
+        val nameTyped = channelNameInput.text.toString().trim()
+        if (input.trim().isEmpty()) {
+            apiStatusLabel.text = "Dán link kênh Douyin vào ô trên trước đã."
+            return
+        }
+        apiStatusLabel.text = "Đang nhận diện kênh…"
+        Thread {
+            try {
+                val (sec, nick) = resolveSecUid(input)
+                val list = loadChannels()
+                if (list.any { it.second == sec }) {
+                    runOnUiThread { apiStatusLabel.text = "Kênh này đã lưu rồi." }
+                    return@Thread
+                }
+                list.add(Pair(if (nameTyped.isEmpty()) nick.ifEmpty { "Kênh mới" } else nameTyped, sec))
+                saveChannels(list)
+                runOnUiThread {
+                    channelInput.setText("")
+                    channelNameInput.setText("")
+                    apiStatusLabel.text = "Đã lưu kênh. Bấm Lấy video mới để xem video của kênh."
+                    renderChannelList()
+                }
+            } catch (e: Exception) {
+                runOnUiThread { apiStatusLabel.text = "Lỗi: ${e.message}" }
+            }
+        }.start()
+    }
+
+    private fun fetchChannel(secUid: String, name: String) {
+        if (!douyinApiOn) {
+            Toast.makeText(this, "Bật công tắc Douyin API ở trên trước đã nhé", Toast.LENGTH_LONG).show()
+            return
+        }
+        apiStatusLabel.text = "Đang lấy video mới của $name…"
+        channelVideosBox.removeAllViews()
+        Thread {
+            try {
+                val items = fetchChannelPosts(secUid)
+                runOnUiThread {
+                    if (items.isEmpty()) {
+                        apiStatusLabel.text = "Kênh $name không có video nào."
+                        return@runOnUiThread
+                    }
+                    apiStatusLabel.text = "Kênh $name: ${items.size} video mới nhất. Bấm Tải ở video muốn lấy (lưu về Phim/SaveGo):"
+                    for ((title, v, dur) in items) {
+                        val mm = dur / 60000
+                        val ss = (dur % 60000) / 1000
+                        val b = btn("🎬 ${title.take(50)} · $mm:${String.format("%02d", ss)} — Tải", -1) {
+                            if (enqueueDownload(v, title, listOf(v), "https://www.douyin.com/")) {
+                                Toast.makeText(this, "Đã thêm vào hàng đợi. Qua tab Tải video để xem tiến trình.", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                        val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                        lp.setMargins(0, dp(3), 0, dp(3))
+                        channelVideosBox.addView(b, lp)
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread { apiStatusLabel.text = "Lỗi lấy video của $name: ${e.message}" }
+            }
+        }.start()
     }
 
     private fun renderHistory() {
