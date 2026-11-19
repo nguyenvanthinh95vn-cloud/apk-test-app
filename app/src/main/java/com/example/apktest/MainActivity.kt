@@ -94,12 +94,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tabSettingsBtn: Button
     private lateinit var settingsPanel: View
     private lateinit var apiToggleBtn: Button
+    private lateinit var clipboardToggleBtn: Button
     private lateinit var apiStatusLabel: TextView
     private lateinit var channelInput: EditText
     private lateinit var channelNameInput: EditText
     private lateinit var channelBox: LinearLayout
     private lateinit var channelVideosBox: LinearLayout
     private var douyinApiOn = false
+    private var clipboardAutoOn = true
+    private var analyzingUrl: String = ""
+    private var fetchRunning = false
     private var apiLoggedIn = false
     private val douyinApiBase = "https://demo.douyin.wtf"
     // Ket qua quet kenh (phan trang 20 video/trang) + video da tick chon (giu khi doi trang).
@@ -312,6 +316,11 @@ class MainActivity : AppCompatActivity() {
         apiLp.setMargins(0, dp(4), 0, 0)
         setBox.addView(apiToggleBtn, apiLp)
         setBox.addView(label("BẬT: quét link Douyin bằng API của repo Douyin_TikTok_Download_API (bản không logo, lấy được cả danh sách video mới của 1 kênh). TẮT: dùng cách quét cũ như trước. API lỗi thì app tự về cách cũ, không mất video."))
+        clipboardToggleBtn = btn("📋 Tự nhận link từ clipboard: BẬT") { toggleClipboardAuto() }
+        val clipLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        clipLp.setMargins(0, dp(4), 0, 0)
+        setBox.addView(clipboardToggleBtn, clipLp)
+        setBox.addView(label("BẬT: sao chép link Douyin rồi mở app là tự dán link mới nhất và tự tìm luôn, khỏi bấm gì. Ra/vào app mà khay nhớ có link mới thì lại tự làm. TẮT: chỉ nhận link khi anh bấm Dán từ khay nhớ."))
         setBox.addView(label("Kênh Douyin đã lưu (chỉ dùng khi bật Douyin API):"))
         channelNameInput = EditText(this)
         channelNameInput.hint = "Tên kênh, vd: 柚子食堂 (để trống thì lấy tên thật của kênh)"
@@ -367,6 +376,7 @@ class MainActivity : AppCompatActivity() {
         fetchRemoteConfig()
         renderHistory()
         updateApiToggleBtn()
+        updateClipboardToggleBtn()
         renderChannelList()
         handleIntent(intent)
     }
@@ -390,6 +400,47 @@ class MainActivity : AppCompatActivity() {
                 sniffWeb()
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        checkClipboardForDouyinLink()
+    }
+
+    // Tự nhận link Douyin từ khay nhớ mỗi lần mở/vào lại app: link mới thì
+    // tự dán + tự tìm luôn, khỏi bấm gì. Link đã tìm rồi thì bỏ qua.
+    // Chỉ đọc khay nhớ khi app đang mở trước mặt (Android 10+ cho phép);
+    // Android 12+ sẽ hiện thông báo hệ thống là app đã đọc khay nhớ.
+    private fun checkClipboardForDouyinLink() {
+        if (!clipboardAutoOn) return
+        if (!::linkInput.isInitialized || fetchRunning) return
+        val url = try {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = cm.primaryClip ?: return
+            if (clip.itemCount == 0) return
+            val text = clip.getItemAt(0).coerceToText(this)?.toString() ?: return
+            extractDouyinUrl(text)
+        } catch (e: Exception) {
+            return
+        } ?: return
+        val prefs = getSharedPreferences("savego", Context.MODE_PRIVATE)
+        if (url == prefs.getString("last_clipboard_link", "")) return
+        linkInput.setText(url)
+        showTab(0)
+        analyze()
+    }
+
+    // Tìm link Douyin trong đoạn chữ copy ra (có hoặc không có https://):
+    // v.douyin.com/…, douyin.com/…, iesdouyin.com/…
+    private fun extractDouyinUrl(text: String): String? {
+        val all = Regex("https?://[^\\s]+").findAll(text.trim())
+        for (m in all) {
+            val u = m.value.trimEnd('.', ',', ')', ']', '"', '\'')
+            if (u.contains("douyin.com") || u.contains("iesdouyin.com")) return u
+        }
+        val bare = Regex("(?:v\\.douyin\\.com|www\\.douyin\\.com|douyin\\.com|iesdouyin\\.com)/[^\\s]+").find(text.trim())
+        val raw = bare?.value?.trimEnd('.', ',', ')', ']', '"', '\'') ?: return null
+        return "https://$raw"
     }
 
     private fun extractUrl(text: String): String? {
@@ -458,6 +509,7 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("savego", Context.MODE_PRIVATE)
         accelOn = prefs.getBoolean("accel_on", false)
         douyinApiOn = prefs.getBoolean("douyin_api_on", false)
+        clipboardAutoOn = prefs.getBoolean("clipboard_auto_on", true)
         workerUrl = prefs.getString("worker_url", "") ?: ""
         apiBase = prefs.getString("api_url", apiBase) ?: apiBase
         runOnUiThread { updateAccelBtn() }
@@ -743,6 +795,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showVariants(title: String, thumb: String, list: List<Variant>) {
+        // Tìm thành công: ghi lại link vừa tìm để lần vào app sau không tìm lại link cũ.
+        // (Tìm lỗi thì không ghi — lần vào app sau sẽ thử lại link đó.)
+        if (analyzingUrl.contains("douyin.com") || analyzingUrl.contains("iesdouyin.com")) {
+            getSharedPreferences("savego", Context.MODE_PRIVATE).edit().putString("last_clipboard_link", analyzingUrl).apply()
+        }
         variants = list
         currentTitle = title
         runOnUiThread {
@@ -772,11 +829,13 @@ class MainActivity : AppCompatActivity() {
             statusLabel.text = "Chưa có link hợp lệ. Anh dán link video vào trước nhé."
             return
         }
+        analyzingUrl = url
         statusLabel.text = "Đang quét các bản của video này…"
         variantsBox.removeAllViews()
         titleLabel.text = ""
         thumbView.visibility = View.GONE
         Thread {
+            fetchRunning = true
             try {
                 // Cach 0 (chi khi bat Douyin API trong Cai dat): hoi API truoc
                 // de lay ban khong logo; loi thi tu roi xuong cach cu ben duoi.
@@ -812,6 +871,8 @@ class MainActivity : AppCompatActivity() {
                 }
             } catch (e: Exception) {
                 setStatus("Lỗi khi quét video: ${e.message}.")
+            } finally {
+                fetchRunning = false
             }
         }.start()
     }
@@ -1797,6 +1858,28 @@ class MainActivity : AppCompatActivity() {
         getSharedPreferences("savego", Context.MODE_PRIVATE).edit().putBoolean("douyin_api_on", douyinApiOn).apply()
         updateApiToggleBtn()
         Toast.makeText(this, if (douyinApiOn) "Đã bật Douyin API — quét link Douyin sẽ thử API không logo trước, lỗi thì tự về cách cũ" else "Đã tắt Douyin API — dùng cách quét cũ như trước", Toast.LENGTH_LONG).show()
+    }
+
+    private fun updateClipboardToggleBtn() {
+        if (!::clipboardToggleBtn.isInitialized) return
+        if (clipboardAutoOn) {
+            clipboardToggleBtn.text = "📋 Tự nhận link từ clipboard: BẬT"
+            clipboardToggleBtn.background = roundedBg(accent)
+            clipboardToggleBtn.setTextColor(Color.BLACK)
+            clipboardToggleBtn.setTypeface(null, Typeface.BOLD)
+        } else {
+            clipboardToggleBtn.text = "📋 Tự nhận link từ clipboard: TẮT"
+            clipboardToggleBtn.background = roundedBg(bgBtn)
+            clipboardToggleBtn.setTextColor(Color.WHITE)
+            clipboardToggleBtn.setTypeface(null, Typeface.NORMAL)
+        }
+    }
+
+    private fun toggleClipboardAuto() {
+        clipboardAutoOn = !clipboardAutoOn
+        getSharedPreferences("savego", Context.MODE_PRIVATE).edit().putBoolean("clipboard_auto_on", clipboardAutoOn).apply()
+        updateClipboardToggleBtn()
+        Toast.makeText(this, if (clipboardAutoOn) "Đã bật tự nhận link — sao chép link Douyin rồi mở app là tự tìm luôn" else "Đã tắt tự nhận link — chỉ nhận link khi anh bấm Dán từ khay nhớ", Toast.LENGTH_LONG).show()
     }
 
     private fun renderChannelList() {
