@@ -407,6 +407,14 @@ class MainActivity : AppCompatActivity() {
         checkClipboardForDouyinLink()
     }
 
+    // Android 10+: getPrimaryClip() trả null khi cửa sổ chưa có input focus,
+    // mà onResume() chạy TRƯỚC khi cửa sổ có focus nên đọc ở onResume luôn
+    // ra null. Đọc lại khi cửa sổ vừa có focus — lúc đó mới đọc được thật.
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) checkClipboardForDouyinLink()
+    }
+
     // Tự nhận link Douyin từ khay nhớ mỗi lần mở/vào lại app: link mới thì
     // tự dán + tự tìm luôn, khỏi bấm gì. Link đã tìm rồi thì bỏ qua.
     // Chỉ đọc khay nhớ khi app đang mở trước mặt (Android 10+ cho phép);
@@ -420,15 +428,23 @@ class MainActivity : AppCompatActivity() {
             if (retry < 10) linkInput.postDelayed({ checkClipboardForDouyinLink(retry + 1) }, 2000)
             return
         }
-        val url = try {
+        val url: String? = try {
             val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            val clip = cm.primaryClip ?: return
-            if (clip.itemCount == 0) return
-            val text = clip.getItemAt(0).coerceToText(this)?.toString() ?: return
-            extractDouyinUrl(text)
+            val clip = cm.primaryClip
+            if (clip == null || clip.itemCount == 0) null
+            else {
+                val text = clip.getItemAt(0).coerceToText(this)?.toString()
+                if (text.isNullOrBlank()) null else extractDouyinUrl(text)
+            }
         } catch (e: Exception) {
+            null
+        }
+        if (url == null) {
+            // Khay nhớ chưa đọc được (thường vì cửa sổ chưa có focus lúc onResume)
+            // hoặc không có link Douyin — thử lại vài lần thay vì bỏ qua lặng lẽ.
+            if (retry < 6) linkInput.postDelayed({ checkClipboardForDouyinLink(retry + 1) }, 500)
             return
-        } ?: return
+        }
         // Chỉ bỏ qua khi kết quả của đúng link này vẫn đang hiện trên màn hình.
         // (Trước đây so với link lưu trong SharedPreferences nên sau khi khởi động
         // lại app — hoặc copy lại đúng link cũ — thì lặng lẽ không làm gì cả.)
