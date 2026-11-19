@@ -411,9 +411,15 @@ class MainActivity : AppCompatActivity() {
     // tự dán + tự tìm luôn, khỏi bấm gì. Link đã tìm rồi thì bỏ qua.
     // Chỉ đọc khay nhớ khi app đang mở trước mặt (Android 10+ cho phép);
     // Android 12+ sẽ hiện thông báo hệ thống là app đã đọc khay nhớ.
-    private fun checkClipboardForDouyinLink() {
+    private fun checkClipboardForDouyinLink(retry: Int = 0) {
         if (!clipboardAutoOn) return
-        if (!::linkInput.isInitialized || fetchRunning) return
+        if (!::linkInput.isInitialized) return
+        // Đang quét dở thì đợi quét xong rồi check lại (tối đa ~20 giây) thay vì
+        // bỏ qua lặng lẽ — trước đây vào app đúng lúc đang quét là mất luôn link.
+        if (fetchRunning) {
+            if (retry < 10) linkInput.postDelayed({ checkClipboardForDouyinLink(retry + 1) }, 2000)
+            return
+        }
         val url = try {
             val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val clip = cm.primaryClip ?: return
@@ -423,10 +429,13 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             return
         } ?: return
-        val prefs = getSharedPreferences("savego", Context.MODE_PRIVATE)
-        if (url == prefs.getString("last_clipboard_link", "")) return
+        // Chỉ bỏ qua khi kết quả của đúng link này vẫn đang hiện trên màn hình.
+        // (Trước đây so với link lưu trong SharedPreferences nên sau khi khởi động
+        // lại app — hoặc copy lại đúng link cũ — thì lặng lẽ không làm gì cả.)
+        if (url == analyzingUrl && variants.isNotEmpty()) return
         linkInput.setText(url)
         showTab(0)
+        Toast.makeText(this, "Đã tự dán link mới, đang tìm…", Toast.LENGTH_SHORT).show()
         analyze()
     }
 
@@ -830,6 +839,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         analyzingUrl = url
+        variants = emptyList() // Xóa kết quả cũ: để lần mở app sau biết link này chưa có kết quả mà thử lại khi quét lỗi.
         statusLabel.text = "Đang quét các bản của video này…"
         variantsBox.removeAllViews()
         titleLabel.text = ""
