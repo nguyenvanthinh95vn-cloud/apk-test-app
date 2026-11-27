@@ -1,604 +1,2148 @@
 package com.example.apktest
 
-import android.app.Activity
-import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
-import android.graphics.Bitmap
-import android.graphics.Canvas
+import android.content.res.ColorStateList
+import android.graphics.BitmapFactory
 import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Rect
-import android.graphics.RectF
-import android.media.AudioFormat
-import android.media.AudioManager
-import android.media.AudioTrack
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.view.Gravity
-import android.view.InputDevice
-import android.view.KeyEvent
+import android.os.Environment
+import android.provider.MediaStore
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
-import android.view.WindowManager
+import android.webkit.WebViewClient
+import android.webkit.WebView
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebResourceError
+import android.webkit.JavascriptInterface
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.CheckBox
-import android.widget.FrameLayout
+import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.SeekBar
+import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import java.io.DataInputStream
-import java.io.DataOutputStream
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
-import kotlin.math.abs
+import java.io.RandomAccessFile
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import java.net.CookieHandler
+import java.net.CookieManager
+import java.net.CookiePolicy
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+
+data class Variant(val quality: String, val url: String, val size: Long, val isAudio: Boolean, val kind: String = "file")
+data class ChannelVideo(val title: String, val variant: Variant, val dur: Long, val cover: String)
+data class DownloadJob(
+    val id: Long,
+    val title: String,
+    var variant: Variant,
+    var referer: String = "",
+    var source: List<Variant> = emptyList(),
+    var state: String = "Đang chờ…",
+    var done: Long = 0,
+    var total: Long = -1,
+    var lastPct: Int = -1
+)
+class JobRow(val bar: ProgressBar, val status: TextView, val retry: Button)
 
 class MainActivity : AppCompatActivity() {
 
-    companion object {
-        const val BTN_A = 0x01
-        const val BTN_B = 0x02
-        const val BTN_SELECT = 0x04
-        const val BTN_START = 0x08
-        const val BTN_UP = 0x10
-        const val BTN_DOWN = 0x20
-        const val BTN_LEFT = 0x40
-        const val BTN_RIGHT = 0x80
-        private const val REQ_ROM = 1001
-        // Cac nut co the keo tha + luu vi tri
-        private val CTL_KEYS = listOf("dpad", "a", "b", "sel", "start")
+    private val accent = Color.rgb(255, 214, 10)
+    private val bgPanel = Color.rgb(26, 26, 32)
+    private val bgBtn = Color.rgb(48, 48, 60)
+    private val uaString = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
+
+    private lateinit var linkInput: EditText
+    private lateinit var statusLabel: TextView
+    private lateinit var titleLabel: TextView
+    private lateinit var thumbView: ImageView
+    private lateinit var variantsBox: LinearLayout
+    private lateinit var historyBox: LinearLayout
+    private lateinit var downloadsBox: LinearLayout
+    private lateinit var downloadsLabel: TextView
+    private lateinit var mainPanel: View
+    private lateinit var historyPanel: View
+    private lateinit var tabDownloadBtn: Button
+    private lateinit var tabHistoryBtn: Button
+    private lateinit var webPanel: View
+    private lateinit var tabWebBtn: Button
+    private lateinit var webLinkInput: EditText
+    private lateinit var webStatusLabel: TextView
+    private lateinit var webVariantsBox: LinearLayout
+    private var webTitle: String = ""
+    private var webPageUrl: String = ""
+    private var webVariants: List<Variant> = emptyList()
+    private lateinit var tabSettingsBtn: Button
+    private lateinit var settingsPanel: View
+    private lateinit var apiToggleBtn: Button
+    private lateinit var clipboardToggleBtn: Button
+    private lateinit var apiStatusLabel: TextView
+    private lateinit var channelInput: EditText
+    private lateinit var channelNameInput: EditText
+    private lateinit var channelBox: LinearLayout
+    private lateinit var channelVideosBox: LinearLayout
+    private var douyinApiOn = false
+    private var clipboardAutoOn = true
+    private var analyzingUrl: String = ""
+    private var fetchRunning = false
+    private var apiLoggedIn = false
+    private val douyinApiBase = "https://demo.douyin.wtf"
+    // Ket qua quet kenh (phan trang 20 video/trang) + video da tick chon (giu khi doi trang).
+    private var channelScanItems: List<ChannelVideo> = emptyList()
+    private var channelScanPage = 0
+    private var channelScanName = ""
+    private val selectedChannelVideos = LinkedHashSet<ChannelVideo>()
+    private var downloadSelectedBtn: Button? = null
+
+    private var variants: List<Variant> = emptyList()
+    private var currentTitle: String = ""
+    private var accelOn = false
+    private var workerUrl = ""
+    private var apiBase = "https://demo.tube5s.com/wp-json/aio-dl/api/?url="
+    private lateinit var accelBtn: Button
+    private var nextJobId = 1L
+    private val jobQueue: ArrayDeque<DownloadJob> = ArrayDeque()
+    private val jobRows = HashMap<Long, JobRow>()
+    private val queueLock = Any()
+    private var activeJobs = 0
+    private val maxConcurrent = 3
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+    private fun roundedBg(color: Int, radiusDp: Int = 12): GradientDrawable {
+        val g = GradientDrawable()
+        g.setColor(color)
+        g.cornerRadius = dp(radiusDp).toFloat()
+        return g
     }
-
-    private val nes = Nes()
-    private lateinit var gameView: GameView
-    private var audioTrack: AudioTrack? = null
-    private var muteButton: Button? = null
-
-    @Volatile private var muted = false
-    @Volatile private var paused = false
-    @Volatile private var threadRun = false
-    private var loopThread: Thread? = null
-
-    // Trang thai dieu khien (OR vao nhau moi khung hinh)
-    @Volatile var touchMask = 0
-    @Volatile var padMask = 0
-    @Volatile var motionMask = 0
-
-    // ----- Cai dat hien thi (luu SharedPreferences) -----
-    private lateinit var uiPrefs: SharedPreferences
-    @Volatile var uiScale = 1.0f           // 0.6x - 1.6x
-    @Volatile var moveMode = false         // che do keo tha nut
-    val ctlOffsets = HashMap<String, FloatArray>()  // key -> [dx, dy] px
-
-    private var romKey = "game"
+    private fun label(text: String, size: Float = 14f): TextView {
+        val tv = TextView(this)
+        tv.text = text
+        tv.textSize = size
+        tv.setTextColor(Color.rgb(215, 215, 220))
+        tv.setPadding(0, dp(8), 0, dp(2))
+        return tv
+    }
+    private fun pressable(v: View) {
+        v.setOnTouchListener { view, ev ->
+            when (ev.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    view.animate().scaleX(0.93f).scaleY(0.93f).setDuration(60).start()
+                    view.alpha = 0.85f
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    view.animate().scaleX(1f).scaleY(1f).setDuration(80).start()
+                    view.alpha = 1f
+                    if (ev.action == MotionEvent.ACTION_UP) {
+                        view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                    }
+                }
+            }
+            false
+        }
+    }
+    private fun btn(text: String, bg: Int = -1, onClick: (View) -> Unit): Button {
+        val b = Button(this)
+        b.text = text
+        b.textSize = 13f
+        if (bg == accent) {
+            b.setTextColor(Color.BLACK)
+            b.setTypeface(null, Typeface.BOLD)
+        } else {
+            b.setTextColor(Color.WHITE)
+        }
+        b.background = roundedBg(if (bg == -1) bgBtn else bg)
+        b.elevation = dp(3).toFloat()
+        b.setOnClickListener(onClick)
+        pressable(b)
+        return b
+    }
+    private fun row(vararg views: View): LinearLayout {
+        val l = LinearLayout(this)
+        l.orientation = LinearLayout.HORIZONTAL
+        for (v in views) {
+            val lp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            lp.setMargins(dp(2), dp(2), dp(2), dp(2))
+            l.addView(v, lp)
+        }
+        return l
+    }
+    private fun fmtSize(bytes: Long): String {
+        if (bytes <= 0) return "?"
+        val mb = bytes / 1048576.0
+        return if (mb >= 1) String.format("%.1f MB", mb) else String.format("%.0f KB", bytes / 1024.0)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        loadUiPrefs()
+        val root = LinearLayout(this)
+        root.orientation = LinearLayout.VERTICAL
+        root.background = GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(Color.rgb(27, 27, 34), Color.rgb(10, 10, 14))
+        )
 
-        val root = FrameLayout(this)
-        gameView = GameView(this)
-        root.addView(gameView, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        // Header
+        val header = LinearLayout(this)
+        header.orientation = LinearLayout.VERTICAL
+        header.setPadding(dp(14), dp(12), dp(14), dp(4))
+        val title = TextView(this)
+        title.text = "SaveGo"
+        title.textSize = 22f
+        title.setTextColor(Color.WHITE)
+        title.setTypeface(null, Typeface.BOLD)
+        header.addView(title)
+        val sub = TextView(this)
+        sub.text = "Tải video Douyin / TikTok / Facebook… — tự tìm bản NÉT NHẤT"
+        sub.textSize = 12.5f
+        sub.setTextColor(Color.rgb(170, 170, 175))
+        header.addView(sub)
+        root.addView(header)
 
-        val bar = LinearLayout(this)
-        bar.orientation = LinearLayout.HORIZONTAL
-        bar.setPadding(8, 8, 8, 8)
-        val romBtn = Button(this).apply { text = "ROM"; setOnClickListener { pickRom() } }
-        val saveBtn = Button(this).apply { text = "Lưu nhanh"; setOnClickListener { saveStateQuick() } }
-        val loadBtn = Button(this).apply { text = "Tải nhanh"; setOnClickListener { loadStateQuick() } }
-        muteButton = Button(this).apply {
-            text = "Tắt tiếng"
-            setOnClickListener {
-                muted = !muted
-                text = if (muted) "Bật tiếng" else "Tắt tiếng"
-            }
-        }
-        val settingsBtn = Button(this).apply { text = "Cài đặt"; setOnClickListener { showDisplaySettings() } }
-        bar.addView(romBtn)
-        bar.addView(saveBtn)
-        bar.addView(loadBtn)
-        bar.addView(muteButton)
-        bar.addView(settingsBtn)
-        val barParams = FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT)
-        barParams.gravity = Gravity.TOP or Gravity.START
-        root.addView(bar, barParams)
+        // Tabs
+        tabDownloadBtn = btn("⬇  Tải video", accent) { showTab(0) }
+        tabWebBtn = btn("🔗  Link web") { showTab(1) }
+        tabHistoryBtn = btn("🕘  Lịch sử") { showTab(2) }
+        tabSettingsBtn = btn("⚙  Cài đặt") { showTab(3) }
+        val tabRow = row(tabDownloadBtn, tabWebBtn, tabHistoryBtn, tabSettingsBtn)
+        tabRow.setPadding(dp(8), dp(2), dp(8), dp(2))
+        root.addView(tabRow)
+
+        // Main panel
+        val mainBox = LinearLayout(this)
+        mainBox.orientation = LinearLayout.VERTICAL
+        mainBox.setPadding(dp(12), dp(6), dp(12), dp(16))
+        mainBox.addView(label("Dán link video vào đây:"))
+        linkInput = EditText(this)
+        linkInput.hint = "https://www.douyin.com/video/…"
+        linkInput.setTextColor(Color.WHITE)
+        linkInput.setHintTextColor(Color.rgb(150, 150, 155))
+        linkInput.background = roundedBg(bgBtn, 10)
+        linkInput.setPadding(dp(10), dp(10), dp(10), dp(10))
+        linkInput.maxLines = 3
+        mainBox.addView(linkInput)
+        mainBox.addView(row(
+            btn("📋 Dán từ khay nhớ") { pasteFromClipboard() },
+            btn("🔍 Tìm bản nét nhất", accent) { analyze() }
+        ))
+        // One-button acceleration toggle: OFF = direct download, ON = via free Cloudflare Worker
+        accelBtn = btn("⚡ Tăng tốc (Cloudflare): TẮT") { toggleAccel() }
+        val accelLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        accelLp.setMargins(0, dp(4), 0, 0)
+        mainBox.addView(accelBtn, accelLp)
+        mainBox.addView(label("Chỉ bật khi tải chậm (buổi tối). Tắt khi tải nhanh để đỡ qua trung gian."))
+        statusLabel = label("Sẵn sàng. Mẹo: trong app Douyin bấm Chia sẻ → Sao chép link, rồi qua đây bấm Dán. Tải được nhiều video cùng lúc.")
+        mainBox.addView(statusLabel)
+        thumbView = ImageView(this)
+        thumbView.scaleType = ImageView.ScaleType.CENTER_CROP
+        thumbView.visibility = View.GONE
+        val thLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(190))
+        thLp.setMargins(0, dp(8), 0, dp(2))
+        mainBox.addView(thumbView, thLp)
+        titleLabel = label("")
+        titleLabel.setTextColor(Color.WHITE)
+        mainBox.addView(titleLabel)
+        variantsBox = LinearLayout(this)
+        variantsBox.orientation = LinearLayout.VERTICAL
+        mainBox.addView(variantsBox)
+        downloadsLabel = label("Đang tải:")
+        downloadsLabel.visibility = View.GONE
+        mainBox.addView(downloadsLabel)
+        downloadsBox = LinearLayout(this)
+        downloadsBox.orientation = LinearLayout.VERTICAL
+        mainBox.addView(downloadsBox)
+        val mainScroll = ScrollView(this)
+        mainScroll.addView(mainBox)
+        mainPanel = mainScroll
+        root.addView(mainScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        // Web sniffer panel (kiểu Cốc Cốc: dán link trang web -> tự bóc video)
+        val webBox = LinearLayout(this)
+        webBox.orientation = LinearLayout.VERTICAL
+        webBox.setPadding(dp(12), dp(6), dp(12), dp(16))
+        webBox.addView(label("Dán link trang web có video (phim, tin tức, Facebook…) vào đây:"))
+        webLinkInput = EditText(this)
+        webLinkInput.hint = "https://…"
+        webLinkInput.setTextColor(Color.WHITE)
+        webLinkInput.setHintTextColor(Color.rgb(150, 150, 155))
+        webLinkInput.background = roundedBg(bgBtn, 10)
+        webLinkInput.setPadding(dp(10), dp(10), dp(10), dp(10))
+        webLinkInput.maxLines = 3
+        webBox.addView(webLinkInput)
+        webBox.addView(row(
+            btn("📋 Dán từ khay nhớ") { pasteWebFromClipboard() },
+            btn("🔍 Tìm video", accent) { sniffWeb() }
+        ))
+        webBox.addView(label("Tự bóc các file video trong trang (mp4, HLS…). YouTube và luồng DASH chưa hỗ trợ ở bản này."))
+        webStatusLabel = label("Mẹo: mở trang web có video, sao chép địa chỉ trang rồi dán vào đây.")
+        webBox.addView(webStatusLabel)
+        webVariantsBox = LinearLayout(this)
+        webVariantsBox.orientation = LinearLayout.VERTICAL
+        webBox.addView(webVariantsBox)
+        val webScroll = ScrollView(this)
+        webScroll.addView(webBox)
+        webScroll.visibility = View.GONE
+        webPanel = webScroll
+        root.addView(webScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        // Settings panel: Douyin API (moi) — chuc nang rieng, mac dinh TAT.
+        // TAT = moi thu nhu cu (quet WebView + tube5s). BAT = quet link Douyin
+        // thu qua Douyin API truoc (ban khong logo), loi thi tu ve cach cu.
+        val setBox = LinearLayout(this)
+        setBox.orientation = LinearLayout.VERTICAL
+        setBox.setPadding(dp(12), dp(6), dp(12), dp(16))
+        setBox.addView(label("Cài đặt", 16f))
+        apiToggleBtn = btn("📡 Douyin API (mới): TẮT") { toggleDouyinApi() }
+        val apiLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        apiLp.setMargins(0, dp(4), 0, 0)
+        setBox.addView(apiToggleBtn, apiLp)
+        setBox.addView(label("BẬT: quét link Douyin bằng API của repo Douyin_TikTok_Download_API (bản không logo, lấy được cả danh sách video mới của 1 kênh). TẮT: dùng cách quét cũ như trước. API lỗi thì app tự về cách cũ, không mất video."))
+        clipboardToggleBtn = btn("📋 Tự nhận link từ clipboard: BẬT") { toggleClipboardAuto() }
+        val clipLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        clipLp.setMargins(0, dp(4), 0, 0)
+        setBox.addView(clipboardToggleBtn, clipLp)
+        setBox.addView(label("BẬT: sao chép link Douyin rồi mở app là tự dán link mới nhất và tự tìm luôn, khỏi bấm gì. Ra/vào app mà khay nhớ có link mới thì lại tự làm. TẮT: chỉ nhận link khi anh bấm Dán từ khay nhớ."))
+        setBox.addView(label("Kênh Douyin đã lưu (chỉ dùng khi bật Douyin API):"))
+        channelNameInput = EditText(this)
+        channelNameInput.hint = "Tên kênh, vd: 柚子食堂 (để trống thì lấy tên thật của kênh)"
+        channelNameInput.setTextColor(Color.WHITE)
+        channelNameInput.setHintTextColor(Color.rgb(150, 150, 155))
+        channelNameInput.background = roundedBg(bgBtn, 10)
+        channelNameInput.setPadding(dp(10), dp(10), dp(10), dp(10))
+        setBox.addView(channelNameInput)
+        channelInput = EditText(this)
+        channelInput.hint = "Dán link kênh (douyin.com/user/…) hoặc link 1 video của kênh — dán cả đoạn chữ Douyin copy ra cũng được"
+        channelInput.setTextColor(Color.WHITE)
+        channelInput.setHintTextColor(Color.rgb(150, 150, 155))
+        channelInput.background = roundedBg(bgBtn, 10)
+        channelInput.setPadding(dp(10), dp(10), dp(10), dp(10))
+        channelInput.maxLines = 3
+        setBox.addView(channelInput)
+        setBox.addView(row(btn("＋ Thêm kênh", accent) { addChannel() }))
+        channelBox = LinearLayout(this)
+        channelBox.orientation = LinearLayout.VERTICAL
+        setBox.addView(channelBox)
+        apiStatusLabel = label("Mẹo: lưu 4 kênh mukbang rồi bấm Lấy video mới, khỏi cần gửi link từng video nữa.")
+        setBox.addView(apiStatusLabel)
+        channelVideosBox = LinearLayout(this)
+        channelVideosBox.orientation = LinearLayout.VERTICAL
+        setBox.addView(channelVideosBox)
+        val setScroll = ScrollView(this)
+        setScroll.addView(setBox)
+        setScroll.visibility = View.GONE
+        settingsPanel = setScroll
+        root.addView(setScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        // History panel
+        val histBox = LinearLayout(this)
+        histBox.orientation = LinearLayout.VERTICAL
+        histBox.setPadding(dp(12), dp(6), dp(12), dp(16))
+        historyBox = LinearLayout(this)
+        historyBox.orientation = LinearLayout.VERTICAL
+        histBox.addView(historyBox)
+        histBox.addView(btn("🗑 Xoá hết lịch sử") {
+            getSharedPreferences("savego", Context.MODE_PRIVATE).edit().remove("history_json").apply()
+            renderHistory()
+        })
+        val histScroll = ScrollView(this)
+        histScroll.addView(histBox)
+        histScroll.visibility = View.GONE
+        historyPanel = histScroll
+        root.addView(histScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
         setContentView(root)
-        startAudio()
-        threadRun = true
-        loopThread = Thread { gameLoop() }.apply { isDaemon = true; start() }
+        try {
+            if (CookieHandler.getDefault() == null) CookieHandler.setDefault(CookieManager(null, CookiePolicy.ACCEPT_ALL))
+        } catch (e: Exception) { }
+        fetchRemoteConfig()
+        renderHistory()
+        updateApiToggleBtn()
+        updateClipboardToggleBtn()
+        renderChannelList()
+        handleIntent(intent)
     }
 
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) {
-            window.decorView.systemUiVisibility =
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        val text = intent?.getStringExtra(Intent.EXTRA_TEXT) ?: return
+        val url = extractUrl(text)
+        if (url != null) {
+            if (url.contains("douyin.com")) {
+                linkInput.setText(url)
+                showTab(0)
+                analyze()
+            } else {
+                webLinkInput.setText(url)
+                showTab(1)
+                sniffWeb()
+            }
         }
     }
 
     override fun onResume() {
         super.onResume()
-        paused = false
+        checkClipboardForDouyinLink()
     }
 
-    override fun onPause() {
-        super.onPause()
-        paused = true
-        saveBattery()
+    // Android 10+: getPrimaryClip() trả null khi cửa sổ chưa có input focus,
+    // mà onResume() chạy TRƯỚC khi cửa sổ có focus nên đọc ở onResume luôn
+    // ra null. Đọc lại khi cửa sổ vừa có focus — lúc đó mới đọc được thật.
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) checkClipboardForDouyinLink()
     }
 
-    override fun onDestroy() {
-        threadRun = false
-        try { audioTrack?.stop() } catch (e: Exception) { }
-        audioTrack?.release()
-        audioTrack = null
-        super.onDestroy()
-    }
-
-    // ---------- Cai dat hien thi ----------
-    private fun loadUiPrefs() {
-        uiPrefs = getSharedPreferences("nes_display", Context.MODE_PRIVATE)
-        uiScale = uiPrefs.getFloat("scale", 1.0f).coerceIn(0.6f, 1.6f)
-        for (key in CTL_KEYS) {
-            ctlOffsets[key] = floatArrayOf(
-                uiPrefs.getFloat("off_${key}_x", 0f),
-                uiPrefs.getFloat("off_${key}_y", 0f))
+    // Tự nhận link Douyin từ khay nhớ mỗi lần mở/vào lại app: link mới thì
+    // tự dán + tự tìm luôn, khỏi bấm gì. Link đã tìm rồi thì bỏ qua.
+    // Chỉ đọc khay nhớ khi app đang mở trước mặt (Android 10+ cho phép);
+    // Android 12+ sẽ hiện thông báo hệ thống là app đã đọc khay nhớ.
+    private fun checkClipboardForDouyinLink(retry: Int = 0) {
+        if (!clipboardAutoOn) return
+        if (!::linkInput.isInitialized) return
+        // Đang quét dở thì đợi quét xong rồi check lại (tối đa ~20 giây) thay vì
+        // bỏ qua lặng lẽ — trước đây vào app đúng lúc đang quét là mất luôn link.
+        if (fetchRunning) {
+            if (retry < 10) linkInput.postDelayed({ checkClipboardForDouyinLink(retry + 1) }, 2000)
+            return
         }
-    }
-
-    private fun saveUiPrefs() {
-        val e = uiPrefs.edit()
-        e.putFloat("scale", uiScale)
-        for (key in CTL_KEYS) {
-            val o = ctlOffsets[key] ?: floatArrayOf(0f, 0f)
-            e.putFloat("off_${key}_x", o[0])
-            e.putFloat("off_${key}_y", o[1])
-        }
-        e.apply()
-    }
-
-    private fun showDisplaySettings() {
-        val d = resources.displayMetrics.density
-        val pad = (16 * d).toInt()
-        val layout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad, pad, pad)
-        }
-        val scaleLabel = TextView(this).apply {
-            text = "Kích cỡ nút: ${"%.1f".format(uiScale)}x"
-            textSize = 15f
-        }
-        val seek = SeekBar(this).apply {
-            max = 100
-            progress = ((uiScale - 0.6f) * 100).toInt().coerceIn(0, 100)
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
-                    uiScale = 0.6f + progress / 100f
-                    scaleLabel.text = "Kích cỡ nút: ${"%.1f".format(uiScale)}x"
-                    gameView.invalidate()
-                }
-                override fun onStartTrackingTouch(sb: SeekBar?) { }
-                override fun onStopTrackingTouch(sb: SeekBar?) { saveUiPrefs() }
-            })
-        }
-        val moveChk = CheckBox(this).apply {
-            text = "Di chuyển nút (kéo thả các nút trên màn hình tới vị trí tùy ý)"
-            textSize = 15f
-            isChecked = moveMode
-            setOnCheckedChangeListener { _, checked ->
-                moveMode = checked
-                if (checked) touchMask = 0
-                gameView.invalidate()
+        val url: String? = try {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = cm.primaryClip
+            if (clip == null || clip.itemCount == 0) null
+            else {
+                val text = clip.getItemAt(0).coerceToText(this)?.toString()
+                if (text.isNullOrBlank()) null else extractDouyinUrl(text)
             }
-        }
-        val resetBtn = Button(this).apply {
-            text = "Đặt lại vị trí gốc"
-            setOnClickListener {
-                for (key in CTL_KEYS) ctlOffsets[key] = floatArrayOf(0f, 0f)
-                uiScale = 1.0f
-                seek.progress = 40
-                scaleLabel.text = "Kích cỡ nút: 1.0x"
-                saveUiPrefs()
-                gameView.invalidate()
-                toast("Đã đặt lại vị trí + kích cỡ gốc")
-            }
-        }
-        layout.addView(scaleLabel)
-        layout.addView(seek)
-        layout.addView(moveChk)
-        layout.addView(resetBtn)
-        AlertDialog.Builder(this)
-            .setTitle("Cài đặt hiển thị")
-            .setView(layout)
-            .setPositiveButton("Đóng", null)
-            .show()
-    }
-
-    // ---------- Audio ----------
-    @Suppress("DEPRECATION")
-    private fun startAudio() {
-        try {
-            val minBuf = AudioTrack.getMinBufferSize(
-                44100, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
-            val size = if (minBuf > 0) minBuf * 2 else 8192
-            audioTrack = AudioTrack(
-                AudioManager.STREAM_MUSIC, 44100,
-                AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT,
-                size, AudioTrack.MODE_STREAM)
-            audioTrack?.play()
         } catch (e: Exception) {
-            audioTrack = null
+            null
         }
+        if (url == null) {
+            // Khay nhớ chưa đọc được (thường vì cửa sổ chưa có focus lúc onResume)
+            // hoặc không có link Douyin — thử lại vài lần thay vì bỏ qua lặng lẽ.
+            if (retry < 6) linkInput.postDelayed({ checkClipboardForDouyinLink(retry + 1) }, 500)
+            return
+        }
+        // Chỉ bỏ qua khi kết quả của đúng link này vẫn đang hiện trên màn hình.
+        // (Trước đây so với link lưu trong SharedPreferences nên sau khi khởi động
+        // lại app — hoặc copy lại đúng link cũ — thì lặng lẽ không làm gì cả.)
+        if (url == analyzingUrl && variants.isNotEmpty()) return
+        linkInput.setText(url)
+        showTab(0)
+        Toast.makeText(this, "Đã tự dán link mới, đang tìm…", Toast.LENGTH_SHORT).show()
+        analyze()
     }
 
-    // ---------- Game loop ----------
-    private fun gameLoop() {
-        while (threadRun) {
-            if (paused || !nes.romLoaded) {
-                try { Thread.sleep(30) } catch (e: InterruptedException) { }
-                continue
-            }
-            val t0 = System.nanoTime()
-            nes.pad1.buttons = touchMask or padMask or motionMask
-            nes.runFrame()
-            val samples = nes.apu.drainSamples()
-            if (!muted && samples.isNotEmpty()) {
-                try { audioTrack?.write(samples, 0, samples.size) } catch (e: Exception) { }
-            }
-            gameView.postInvalidate()
-            val usedMs = (System.nanoTime() - t0) / 1_000_000L
-            val rest = 16L - usedMs
-            if (rest > 0) {
-                try { Thread.sleep(rest) } catch (e: InterruptedException) { }
-            }
+    // Tìm link Douyin trong đoạn chữ copy ra (có hoặc không có https://):
+    // v.douyin.com/…, douyin.com/…, iesdouyin.com/…
+    private fun extractDouyinUrl(text: String): String? {
+        val all = Regex("https?://[^\\s]+").findAll(text.trim())
+        for (m in all) {
+            val u = m.value.trimEnd('.', ',', ')', ']', '"', '\'')
+            if (u.contains("douyin.com") || u.contains("iesdouyin.com")) return u
         }
+        val bare = Regex("(?:v\\.douyin\\.com|www\\.douyin\\.com|douyin\\.com|iesdouyin\\.com)/[^\\s]+").find(text.trim())
+        val raw = bare?.value?.trimEnd('.', ',', ')', ']', '"', '\'') ?: return null
+        return "https://$raw"
     }
 
-    // ---------- ROM / luu tru ----------
-    private fun pickRom() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
-        }
-        startActivityForResult(intent, REQ_ROM)
+    private fun extractUrl(text: String): String? {
+        val m = Regex("https?://[^\\s]+").find(text.trim())
+        return m?.value?.trimEnd('.', ',', ')', ']', '"', '\'')
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQ_ROM || resultCode != Activity.RESULT_OK) return
-        val uri = data?.data ?: return
-        try {
-            saveBattery()
-            val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                ?: throw IllegalStateException("Khong doc duoc file")
-            romKey = "rom_" + bytes.contentHashCode().toString(16)
-            val savFile = File(filesDir, "$romKey.sav")
-            val battery = if (savFile.exists()) savFile.readBytes() else null
-            val err = nes.loadRom(bytes, battery)
-            if (err == null) {
-                toast("Đã nạp game (${bytes.size / 1024} KB) — mapper ${nes.cart?.mapperId}")
+    private fun styleTab(b: Button, active: Boolean) {
+        b.background = roundedBg(if (active) accent else bgBtn)
+        b.setTextColor(if (active) Color.BLACK else Color.WHITE)
+    }
+
+    private fun pasteWebFromClipboard() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clip: ClipData? = cm.primaryClip
+        if (clip != null && clip.itemCount > 0) {
+            val t = clip.getItemAt(0).coerceToText(this)?.toString() ?: ""
+            val url = extractUrl(t)
+            if (url != null) {
+                webLinkInput.setText(url)
+                webStatusLabel.text = "Đã dán link. Bấm Tìm video."
             } else {
-                toast(err)
+                webStatusLabel.text = "Trong khay nhớ không có link nào."
             }
-        } catch (e: Exception) {
-            toast("Lỗi đọc ROM: ${e.message}")
+        } else {
+            webStatusLabel.text = "Khay nhớ đang trống."
         }
     }
 
-    private fun saveBattery() {
-        try {
-            val data = nes.batteryData() ?: return
-            File(filesDir, "$romKey.sav").writeBytes(data)
-        } catch (e: Exception) { }
+    private fun showTab(index: Int) {
+        mainPanel.visibility = if (index == 0) View.VISIBLE else View.GONE
+        webPanel.visibility = if (index == 1) View.VISIBLE else View.GONE
+        historyPanel.visibility = if (index == 2) View.VISIBLE else View.GONE
+        settingsPanel.visibility = if (index == 3) View.VISIBLE else View.GONE
+        styleTab(tabDownloadBtn, index == 0)
+        styleTab(tabWebBtn, index == 1)
+        styleTab(tabHistoryBtn, index == 2)
+        styleTab(tabSettingsBtn, index == 3)
+        if (index == 2) renderHistory()
+        if (index == 3) renderChannelList()
     }
 
-    private fun saveStateQuick() {
-        if (!nes.romLoaded) { toast("Chưa nạp game"); return }
-        try {
-            DataOutputStream(FileOutputStream(File(filesDir, "$romKey.state"))).use { out ->
-                nes.saveState(out)
+    private fun pasteFromClipboard() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clip: ClipData? = cm.primaryClip
+        if (clip != null && clip.itemCount > 0) {
+            val t = clip.getItemAt(0).coerceToText(this)?.toString() ?: ""
+            val url = extractUrl(t)
+            if (url != null) {
+                linkInput.setText(url)
+                statusLabel.text = "Đã dán link. Bấm Tìm bản nét nhất."
+            } else {
+                statusLabel.text = "Trong khay nhớ không có link nào."
             }
-            toast("Đã lưu nhanh")
-        } catch (e: Exception) {
-            toast("Lưu lỗi: ${e.message}")
+        } else {
+            statusLabel.text = "Khay nhớ đang trống."
         }
     }
 
-    private fun loadStateQuick() {
-        if (!nes.romLoaded) { toast("Chưa nạp game"); return }
-        val f = File(filesDir, "$romKey.state")
-        if (!f.exists()) { toast("Chưa có bản lưu nhanh cho game này"); return }
+    private fun setStatus(msg: String) {
+        runOnUiThread { statusLabel.text = msg }
+    }
+
+    // Remote config (savego-config.json in the repo): worker_url + api_url, read on launch
+    private fun fetchRemoteConfig() {
+        val prefs = getSharedPreferences("savego", Context.MODE_PRIVATE)
+        accelOn = prefs.getBoolean("accel_on", false)
+        douyinApiOn = prefs.getBoolean("douyin_api_on", false)
+        clipboardAutoOn = prefs.getBoolean("clipboard_auto_on", true)
+        workerUrl = prefs.getString("worker_url", "") ?: ""
+        apiBase = prefs.getString("api_url", apiBase) ?: apiBase
+        runOnUiThread { updateAccelBtn() }
+        Thread {
+            try {
+                val json = JSONObject(httpGetText("https://raw.githubusercontent.com/nguyenvanthinh95vn-cloud/apk-test-app/main/savego-config.json"))
+                val w = json.optString("worker_url", "")
+                val a = json.optString("api_url", "")
+                prefs.edit().apply {
+                    if (w.isNotEmpty() || json.has("worker_url")) putString("worker_url", w)
+                    if (a.isNotEmpty()) putString("api_url", a)
+                }.apply()
+                workerUrl = w
+                if (a.isNotEmpty()) apiBase = a
+                runOnUiThread { updateAccelBtn() }
+            } catch (e: Exception) { }
+        }.start()
+    }
+
+    private fun updateAccelBtn() {
+        if (!::accelBtn.isInitialized) return
+        if (accelOn) {
+            accelBtn.text = "⚡ Tăng tốc (Cloudflare): BẬT"
+            accelBtn.background = roundedBg(accent)
+            accelBtn.setTextColor(Color.BLACK)
+            accelBtn.setTypeface(null, Typeface.BOLD)
+        } else {
+            accelBtn.text = "⚡ Tăng tốc (Cloudflare): TẮT"
+            accelBtn.background = roundedBg(bgBtn)
+            accelBtn.setTextColor(Color.WHITE)
+            accelBtn.setTypeface(null, Typeface.NORMAL)
+        }
+    }
+
+    private fun toggleAccel() {
+        accelOn = !accelOn
+        getSharedPreferences("savego", Context.MODE_PRIVATE).edit().putBoolean("accel_on", accelOn).apply()
+        updateAccelBtn()
+        if (accelOn) {
+            if (workerUrl.isEmpty()) {
+                Toast.makeText(this, "Đã bật tăng tốc, nhưng chưa có địa chỉ máy chủ — cần triển khai Worker 1 lần trước", Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(this, "Đã bật tăng tốc qua Cloudflare", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Toast.makeText(this, "Đã tắt tăng tốc — tải trực tiếp", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun proxied(url: String): String {
+        return if (accelOn && workerUrl.isNotEmpty()) {
+            workerUrl.trimEnd('/') + "?u=" + URLEncoder.encode(url, "UTF-8")
+        } else {
+            url
+        }
+    }
+
+    private fun httpGetText(url: String): String {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.setRequestProperty("User-Agent", uaString)
+        conn.connectTimeout = 20000
+        conn.readTimeout = 40000
+        conn.instanceFollowRedirects = true
+        val code = conn.responseCode
+        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+        val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
+        if (code !in 200..299) throw RuntimeException("Máy chủ trả lỗi $code")
+        return text
+    }
+
+    private fun labelScore(q: String): Int {
+        val s = q.lowercase()
+        return when {
+            s.contains("watermark") -> -1
+            s.contains("original") -> 400
+            s.contains("1080") -> 350
+            s.contains("hd") || s.contains("720") -> 300
+            s.contains("540") || s.contains("480") || s.contains("sd") -> 200
+            s.contains("low") || s.contains("360") || s.contains("240") -> 100
+            else -> 150
+        }
+    }
+
+    // ---------- Quét thẳng từ Douyin bằng WebView (giả làm trình duyệt thật) ----------
+    // Douyin chặn kiểu tải thô (link rút gọn còn bị đá về trang chủ), nhưng WebView
+    // chạy JavaScript như Chrome thật nên vượt được màn chống bot của nó.
+    private class ScanState {
+        @Volatile var webView: WebView? = null
+        @Volatile var html: String? = null
+        @Volatile var pageUrl: String = ""
+        @Volatile var error: String? = null
+    }
+
+    private val scanJs = "(function(){try{var h=document.documentElement.outerHTML;" +
+        "if(h&&h.indexOf('bit_rate')>=0){HtmlHook.pushHtml(h,location.href)}}catch(e){}})()"
+
+    private fun setupScanWebView(shareUrl: String, state: ScanState) {
+        val wv = WebView(this)
+        state.webView = wv
+        wv.settings.javaScriptEnabled = true
+        wv.settings.domStorageEnabled = true
+        wv.settings.userAgentString = uaString
+        wv.addJavascriptInterface(object {
+            @JavascriptInterface
+            fun pushHtml(h: String, u: String) {
+                if (state.html == null && h.contains("bit_rate")) {
+                    state.html = h
+                    state.pageUrl = u
+                }
+            }
+        }, "HtmlHook")
+        wv.webViewClient = object : WebViewClient() {
+            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                if (request.isForMainFrame && state.error == null) {
+                    state.error = "Không mở được trang Douyin (${error.description})"
+                }
+            }
+        }
+        (linkInput.parent as? ViewGroup)?.addView(wv, 1, 1)
+        wv.loadUrl(shareUrl)
+    }
+
+    private fun fetchDouyinHtmlViaWebView(shareUrl: String): Pair<String, String> {
+        val state = ScanState()
+        runOnUiThread { setupScanWebView(shareUrl, state) }
+        val deadline = System.currentTimeMillis() + 30000
         try {
-            DataInputStream(FileInputStream(f)).use { inp -> nes.loadState(inp) }
-            toast("Đã tải bản lưu")
+            while (System.currentTimeMillis() < deadline) {
+                if (state.html != null || state.error != null) break
+                Thread.sleep(1500)
+                runOnUiThread {
+                    try { state.webView?.evaluateJavascript(scanJs, null) } catch (ignored: Exception) { }
+                }
+            }
+        } catch (ignored: InterruptedException) { }
+        runOnUiThread {
+            try {
+                (state.webView?.parent as? ViewGroup)?.removeView(state.webView)
+                state.webView?.destroy()
+            } catch (ignored: Exception) { }
+            state.webView = null
+        }
+        state.error?.let { throw RuntimeException(it) }
+        val html = state.html
+            ?: throw RuntimeException("Douyin không trả dữ liệu video (link có thể đã hết hạn)")
+        return Pair(state.pageUrl, html)
+    }
+
+
+    // Cat mang JSON theo key, vd extractJsonArray(html, "bit_rate") -> "[{...},{...}]"
+    private fun extractJsonArray(html: String, key: String): String? {
+        val startKey = html.indexOf("\"" + key + "\":")
+        if (startKey < 0) return null
+        var i = html.indexOf('[', startKey)
+        if (i < 0) return null
+        var depth = 0
+        var inStr = false
+        var esc = false
+        val sb = StringBuilder()
+        while (i < html.length) {
+            val c = html[i]
+            sb.append(c)
+            if (esc) esc = false
+            else if (inStr && c == '\\') esc = true
+            else if (c == '"') inStr = !inStr
+            else if (!inStr) {
+                if (c == '[') depth++
+                else if (c == ']') {
+                    depth--
+                    if (depth == 0) return sb.toString()
+                }
+            }
+            i++
+            if (sb.length > 2000000) return null
+        }
+        return null
+    }
+
+    private fun unescapeJson(raw: String): String {
+        val sb = StringBuilder()
+        var i = 0
+        while (i < raw.length) {
+            val c = raw[i]
+            if (c == '\\' && i + 1 < raw.length) {
+                val n = raw[i + 1]
+                when (n) {
+                    'n' -> sb.append('\n')
+                    't' -> sb.append('\t')
+                    'r' -> sb.append('\r')
+                    '"' -> sb.append('"')
+                    '\\' -> sb.append('\\')
+                    '/' -> sb.append('/')
+                    'u' -> {
+                        if (i + 5 < raw.length) {
+                            sb.append(raw.substring(i + 2, i + 6).toIntOrNull(16)?.toChar() ?: '?')
+                            i += 4
+                        }
+                    }
+                    else -> sb.append(n)
+                }
+                i += 2
+            } else {
+                sb.append(c)
+                i++
+            }
+        }
+        return sb.toString()
+    }
+
+    private fun extractDouyinDesc(html: String): String {
+        val key = "\"desc\":\""
+        val s = html.indexOf(key)
+        if (s < 0) return ""
+        var i = s + key.length
+        val sb = StringBuilder()
+        while (i < html.length) {
+            val c = html[i]
+            if (c == '\\' && i + 1 < html.length) {
+                sb.append(c); sb.append(html[i + 1]); i += 2
+            } else if (c == '"') {
+                break
+            } else {
+                sb.append(c); i++
+            }
+            if (sb.length > 500) break
+        }
+        return unescapeJson(sb.toString()).trim().take(120)
+    }
+
+    // Trả về (tiêu đề, danh sách bản). Ném exception nếu không quét được.
+    private fun scanDouyinDirect(shareUrl: String): Pair<String, List<Variant>> {
+        setStatus("Đang mở Douyin để quét (giả làm trình duyệt, mất khoảng 10-20 giây)…")
+        val (pageUrl, html) = fetchDouyinHtmlViaWebView(shareUrl)
+        val videoId = Regex("/video/(\\d+)").find(pageUrl)?.groupValues?.get(1) ?: "video"
+        val arrText = extractJsonArray(html, "bit_rate")
+            ?: throw RuntimeException("Không tìm thấy các bản video trong trang Douyin")
+        val arr = JSONArray(arrText)
+        val list = mutableListOf<Variant>()
+        val seen = HashSet<String>()
+        for (i in 0 until arr.length()) {
+            val e = arr.optJSONObject(i) ?: continue
+            val gear = e.optString("gear_name", "")
+            val pa = e.optJSONObject("play_addr") ?: continue
+            val urls = pa.optJSONArray("url_list") ?: continue
+            val u = urls.optString(0, "")
+            if (u.isEmpty() || !seen.add(u)) continue
+            val label = when {
+                gear.contains("1080") -> "1080p"
+                gear.contains("720") -> "720p"
+                gear.contains("540") || gear.contains("480") -> "540p"
+                gear.contains("360") || gear.contains("240") -> "360p"
+                else -> gear.ifEmpty { "video" }
+            }
+            list.add(Variant(label, u, 0L, false))
+        }
+        if (list.isEmpty()) throw RuntimeException("Douyin không trả về bản video nào")
+        val title = extractDouyinDesc(html).ifEmpty { "douyin_$videoId" }
+        return Pair(title, list)
+    }
+
+
+    // Quet qua API trung gian (du phong khi quet thang that bai)
+    private fun scanViaApi(url: String): Triple<String, String, List<Variant>> {
+        val apiUrl = apiBase + URLEncoder.encode(url, "UTF-8")
+        val json = JSONObject(httpGetText(apiUrl))
+        val medias = json.optJSONArray("medias")
+        if (medias == null || medias.length() == 0) {
+            val err = json.optString("error", "")
+            throw RuntimeException(if (err.isNotEmpty()) err else "API không trả về video")
+        }
+        val list = mutableListOf<Variant>()
+        for (i in 0 until medias.length()) {
+            val m = medias.optJSONObject(i) ?: continue
+            val u = m.optString("url", "")
+            if (u.isEmpty()) continue
+            val q = m.optString("quality", "video")
+            val size = m.optString("size", "0").toLongOrNull() ?: 0L
+            val isAudio = q.lowercase().contains("kbps") || u.contains(".mp3") || q.lowercase().contains("audio")
+            list.add(Variant(q, u, size, isAudio))
+        }
+        if (list.isEmpty()) throw RuntimeException("Kết quả API trống")
+        return Triple(json.optString("title", "video"), json.optString("thumbnail", ""), list)
+    }
+
+    private fun showVariants(title: String, thumb: String, list: List<Variant>) {
+        // Tìm thành công: ghi lại link vừa tìm để lần vào app sau không tìm lại link cũ.
+        // (Tìm lỗi thì không ghi — lần vào app sau sẽ thử lại link đó.)
+        if (analyzingUrl.contains("douyin.com") || analyzingUrl.contains("iesdouyin.com")) {
+            getSharedPreferences("savego", Context.MODE_PRIVATE).edit().putString("last_clipboard_link", analyzingUrl).apply()
+        }
+        variants = list
+        currentTitle = title
+        runOnUiThread {
+            statusLabel.text = "Tìm thấy ${list.size} bản. Bản ⭐ là nét nhất — bấm Tải là xong. Tải được nhiều video cùng lúc, tối đa 3 file chạy song song."
+            titleLabel.text = title
+            renderVariants()
+        }
+        if (thumb.isNotEmpty()) {
+            try {
+                val conn = URL(thumb).openConnection() as HttpURLConnection
+                conn.setRequestProperty("User-Agent", uaString)
+                conn.connectTimeout = 15000
+                conn.readTimeout = 15000
+                val bmp = conn.inputStream.use { BitmapFactory.decodeStream(it) }
+                if (bmp != null) runOnUiThread {
+                    thumbView.setImageBitmap(bmp)
+                    thumbView.visibility = View.VISIBLE
+                }
+            } catch (e: Exception) { }
+        }
+    }
+
+    private fun analyze() {
+        val raw = linkInput.text.toString()
+        val url = extractUrl(raw)
+        if (url == null) {
+            statusLabel.text = "Chưa có link hợp lệ. Anh dán link video vào trước nhé."
+            return
+        }
+        analyzingUrl = url
+        variants = emptyList() // Xóa kết quả cũ: để lần mở app sau biết link này chưa có kết quả mà thử lại khi quét lỗi.
+        statusLabel.text = "Đang quét các bản của video này…"
+        variantsBox.removeAllViews()
+        titleLabel.text = ""
+        thumbView.visibility = View.GONE
+        Thread {
+            fetchRunning = true
+            try {
+                // Cach 0 (chi khi bat Douyin API trong Cai dat): hoi API truoc
+                // de lay ban khong logo; loi thi tu roi xuong cach cu ben duoi.
+                var directErr = ""
+                if (url.contains("douyin.com") && douyinApiOn) {
+                    try {
+                        val (t, th, l) = scanViaDouyinApi(url)
+                        showVariants(t, th, l)
+                        return@Thread
+                    } catch (e: Exception) {
+                        directErr = "API: ${e.message ?: "không rõ lỗi"}"
+                    }
+                }
+                // Cach 1: quet thang tu Douyin, khong can may chu trung gian
+                if (url.contains("douyin.com")) {
+                    try {
+                        val (t, l) = scanDouyinDirect(url)
+                        showVariants(t, "", l)
+                        return@Thread
+                    } catch (e: Exception) {
+                        directErr = e.message ?: "không rõ lỗi"
+                    }
+                }
+                // Cach 2 (du phong): API trung gian
+                try {
+                    val (t, th, l) = scanViaApi(url)
+                    showVariants(t, th, l)
+                } catch (e: Exception) {
+                    val msg = e.message ?: "khong ro loi"
+                    setStatus(if (msg.contains("523"))
+                        "Máy chủ quét link trung gian đang sập (lỗi 523) — không phải lỗi mạng nhà anh. Quét thẳng cũng lỗi: $directErr. Anh thử lại sau ít phút nhé."
+                    else "Lỗi khi quét video: $msg. Kiểm tra mạng rồi thử lại.")
+                }
+            } catch (e: Exception) {
+                setStatus("Lỗi khi quét video: ${e.message}.")
+            } finally {
+                fetchRunning = false
+            }
+        }.start()
+    }
+
+    private fun bestVariant(): Variant? {
+        val videos = variants.filter { !it.isAudio && labelScore(it.quality) >= 0 }
+        if (videos.isEmpty()) return null
+        return videos.maxWithOrNull(compareBy<Variant> { labelScore(it.quality) }.thenBy { it.size })
+    }
+
+    private fun renderVariants() {
+        variantsBox.removeAllViews()
+        val best = bestVariant()
+        val sorted = variants.sortedWith(
+            compareByDescending<Variant> { if (it.isAudio) -2 else labelScore(it.quality) }.thenByDescending { it.size }
+        )
+        variantsBox.addView(label("Các bản tìm được (bấm Tải ở bản muốn lấy):"))
+        for (v in sorted) {
+            val isBest = best != null && v.url == best.url
+            val name = when {
+                v.isAudio -> "🎵 Chỉ tiếng · ${v.quality}"
+                v.quality.lowercase().contains("watermark") -> "💧 Bản có logo · ${fmtSize(v.size)}"
+                isBest -> "⭐ ${v.quality.uppercase()} · ${fmtSize(v.size)} — NÉT NHẤT"
+                else -> "🎬 ${v.quality.uppercase()} · ${fmtSize(v.size)}"
+            }
+            val b = btn("$name — Tải", if (isBest) accent else -1) { download(v) }
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            lp.setMargins(0, dp(3), 0, dp(3))
+            variantsBox.addView(b, lp)
+        }
+    }
+
+    // ---------- Universal web video sniffer (kiểu Cốc Cốc) ----------
+    private fun resolveUrl(base: String, rel: String): String {
+        return try {
+            var r = rel.trim()
+            if (r.startsWith("//")) r = "https:" + r
+            URL(URL(base), r).toString()
+        } catch (e: Exception) { rel }
+    }
+
+    private fun fetchWebPage(url: String): Triple<String, String, String> {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.setRequestProperty("User-Agent", uaString)
+        conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        conn.setRequestProperty("Accept-Language", "vi,en;q=0.8")
+        conn.connectTimeout = 20000
+        conn.readTimeout = 40000
+        conn.instanceFollowRedirects = true
+        val code = conn.responseCode
+        val ct = conn.contentType ?: ""
+        val finalUrl = conn.url.toString()
+        val html = if (code in 200..299 && !ct.startsWith("video/") && (ct.contains("html") || ct.isEmpty())) {
+            conn.inputStream.bufferedReader().use { it.readText() }.take(2000000)
+        } else ""
+        conn.disconnect()
+        if (code !in 200..299) throw RuntimeException("Trang web trả lỗi $code")
+        return Triple(finalUrl, html, ct)
+    }
+
+    private fun extractWebTitle(html: String): String {
+        if (html.isEmpty()) return ""
+        var t = Regex("<meta[^>]+property\\s*=\\s*[\"']og:title[\"'][^>]+content\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+            .find(html)?.groupValues?.get(1) ?: ""
+        if (t.isEmpty()) {
+            t = Regex("<title[^>]*>([^<]+)</title>", RegexOption.IGNORE_CASE).find(html)?.groupValues?.get(1) ?: ""
+        }
+        return t.trim().take(100)
+    }
+
+    private fun probeFile(url: String): Pair<String, Long> {
+        return try {
+            val conn = URL(url).openConnection() as HttpURLConnection
+            conn.requestMethod = "HEAD"
+            conn.setRequestProperty("User-Agent", uaString)
+            conn.connectTimeout = 15000
+            conn.readTimeout = 15000
+            conn.instanceFollowRedirects = true
+            val ct = conn.contentType ?: ""
+            val len = conn.contentLengthLong
+            conn.disconnect()
+            Pair(ct, len)
+        } catch (e: Exception) { Pair("", 0L) }
+    }
+
+    private fun httpGetWithReferer(url: String, referer: String): String {
+        val conn = openConn(url, null, referer)
+        val code = conn.responseCode
+        val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+            ?.bufferedReader()?.use { it.readText() } ?: ""
+        conn.disconnect()
+        if (code !in 200..299) throw RuntimeException("Máy chủ trả lỗi $code")
+        return text
+    }
+
+    private fun parseM3u8Variants(playlistUrl: String, referer: String): List<Variant> {
+        val text = httpGetWithReferer(playlistUrl, referer)
+        val lines = text.lines()
+        val out = mutableListOf<Variant>()
+        if (lines.any { it.startsWith("#EXT-X-STREAM-INF") }) {
+            var pendingRes = ""
+            for (line in lines) {
+                when {
+                    line.startsWith("#EXT-X-STREAM-INF") -> {
+                        pendingRes = Regex("RESOLUTION=\\d+x(\\d+)").find(line)?.groupValues?.get(1) ?: ""
+                    }
+                    line.isNotBlank() && !line.startsWith("#") -> {
+                        val u = resolveUrl(playlistUrl, line.trim())
+                        out.add(Variant(if (pendingRes.isNotEmpty()) "${pendingRes}p · HLS" else "HLS", u, 0L, false, "hls"))
+                        pendingRes = ""
+                    }
+                }
+            }
+        } else if (lines.any { it.startsWith("#EXTM3U") }) {
+            out.add(Variant("HLS", playlistUrl, 0L, false, "hls"))
+        }
+        return out
+    }
+
+    // ---------- Bắt link video bằng WebView rình request (kiểu Cốc Cốc) ----------
+    // Nạp trang nhúng video vào trình duyệt ẩn, rình mọi request mạng:
+    // khi trình phát xin file .m3u8/.mp4 là chộp lấy link thật. Không cần biết
+    // host mã hóa kiểu gì vì trình phát tự giải mã rồi xin link thay mình.
+    private class SniffState {
+        @Volatile var webView: WebView? = null
+        @Volatile var mediaUrl: String? = null
+    }
+
+    private val sniffNudgeJs = "(function(){try{var v=document.querySelector('video');" +
+        "if(v&&v.paused){v.muted=true;v.play().catch(function(){})}}catch(e){}})()"
+
+    private fun sniffEmbedViaWebView(embedUrl: String, referer: String): String? {
+        val state = SniffState()
+        runOnUiThread {
+            try {
+                val wv = WebView(this)
+                state.webView = wv
+                wv.settings.javaScriptEnabled = true
+                wv.settings.domStorageEnabled = true
+                wv.settings.mediaPlaybackRequiresUserGesture = false
+                wv.settings.userAgentString = uaString
+                wv.webViewClient = object : WebViewClient() {
+                    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                        try {
+                            val u = request.url.toString()
+                            if (state.mediaUrl == null) {
+                                val lu = u.lowercase()
+                                if (lu.contains(".m3u8") ||
+                                    (lu.contains(".mp4") && !lu.contains("poster") && !lu.contains("thumb") && !lu.contains("preview"))
+                                ) {
+                                    state.mediaUrl = u
+                                }
+                            }
+                        } catch (e: Exception) { }
+                        return null
+                    }
+                }
+                (linkInput.parent as? ViewGroup)?.addView(wv, 1, 1)
+                wv.loadUrl(embedUrl)
+            } catch (e: Exception) { }
+        }
+        val deadline = System.currentTimeMillis() + 25000
+        try {
+            while (System.currentTimeMillis() < deadline) {
+                if (state.mediaUrl != null) break
+                Thread.sleep(1500)
+                runOnUiThread {
+                    try { state.webView?.evaluateJavascript(sniffNudgeJs, null) } catch (e: Exception) { }
+                }
+            }
+        } catch (e: InterruptedException) { }
+        runOnUiThread {
+            try {
+                (state.webView?.parent as? ViewGroup)?.removeView(state.webView)
+                state.webView?.destroy()
+            } catch (e: Exception) { }
+            state.webView = null
+        }
+        return state.mediaUrl
+    }
+
+    // Giải mã nhúng vixeo.io: trang nhúng giấu link m3u8 trong 1 chuỗi base64,
+    // bên trong là JSON có trường "source" = các đoạn hex nối bằng |, giải hex rồi ĐẢO NGƯỢC chuỗi là ra link thật.
+    private fun decodeVixeoEmbed(embedUrl: String, referer: String): String? {
+        return try {
+            val html = httpGetWithReferer(embedUrl, referer)
+            val blobs = Regex("\"([A-Za-z0-9+/=]{200,})\"").findAll(html).map { it.groupValues[1] }.distinct().toList()
+            for (b in blobs) {
+                try {
+                    val jsonText = String(android.util.Base64.decode(b, android.util.Base64.DEFAULT), Charsets.UTF_8)
+                    val source = JSONObject(jsonText).optString("source", "")
+                    if (source.isEmpty()) continue
+                    val joined = source.split("|").mapNotNull { part ->
+                        try {
+                            String(part.chunked(2).map { it.toInt(16).toByte() }.toByteArray(), Charsets.UTF_8)
+                        } catch (e: Exception) { null }
+                    }.joinToString("")
+                    if (joined.isEmpty()) continue
+                    val url = joined.reversed()
+                    if (url.contains(".m3u8")) return url
+                } catch (e: Exception) { }
+            }
+            null
+        } catch (e: Exception) { null }
+    }
+
+    // Trả về (tiêu đề, url trang cuối, danh sách bản)
+    private fun sniffWebPage(pageUrl: String): Triple<String, String, List<Variant>> {
+        val low = pageUrl.lowercase()
+        if (low.contains("youtube.com/watch") || low.contains("youtu.be/") || low.contains("youtube.com/shorts") || low.contains("youtube.com/embed/"))
+            throw RuntimeException("YouTube chưa được hỗ trợ ở bản này — anh dùng Cốc Cốc hoặc app chuyên tải YouTube nhé.")
+        val (finalUrl, html, contentType) = fetchWebPage(pageUrl)
+        val title = extractWebTitle(html).ifEmpty { finalUrl }
+        val cands = LinkedHashSet<String>()
+        val lowFinal = finalUrl.lowercase()
+        if (Regex("\\.(mp4|webm|mov)(\\?|$)").containsMatchIn(lowFinal) || contentType.startsWith("video/")) {
+            cands.add(finalUrl)
+        }
+        if (html.isNotEmpty()) {
+            Regex("<(?:video|source)[^>]+src\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                .findAll(html).forEach { cands.add(it.groupValues[1]) }
+            Regex("<meta[^>]+property\\s*=\\s*[\"'](?:og:video(?::secure_url|:url)?|twitter:player:stream)[\"'][^>]+content\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                .findAll(html).forEach { cands.add(it.groupValues[1]) }
+            Regex("<meta[^>]+content\\s*=\\s*[\"']([^\"']+)[\"'][^>]+property\\s*=\\s*[\"'](?:og:video(?::secure_url|:url)?|twitter:player:stream)[\"']", RegexOption.IGNORE_CASE)
+                .findAll(html).forEach { cands.add(it.groupValues[1]) }
+            Regex("\"contentUrl\"\\s*:\\s*\"([^\"]+)\"", RegexOption.IGNORE_CASE)
+                .findAll(html).forEach { cands.add(unescapeJson(it.groupValues[1])) }
+            Regex("https?://[^\\s\"'<>]+\\.(?:mp4|webm|mov|m3u8|mpd)(?:\\?[^\\s\"'<>]*)?", RegexOption.IGNORE_CASE)
+                .findAll(html).forEach { cands.add(it.value) }
+        }
+        val list = mutableListOf<Variant>()
+        var dashSkipped = 0
+        // Riêng host vixeo.io: giải mã nhúng 2 lớp lấy link m3u8 thật
+        if (html.isNotEmpty()) {
+            val iframeUrls = Regex("<iframe[^>]+src\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                .findAll(html).map { it.groupValues[1] }.toList()
+            for (f in iframeUrls) {
+                val fu = resolveUrl(finalUrl, f)
+                if (fu.contains("vixeo.io")) {
+                    val m3u8 = decodeVixeoEmbed(fu, finalUrl)
+                    if (m3u8 != null) {
+                        try { list.addAll(parseM3u8Variants(m3u8, finalUrl)) } catch (e: Exception) { }
+                    }
+                }
+            }
+        }
+        for (rawU in cands.take(25)) {
+            val u = resolveUrl(finalUrl, rawU).trim('\'', '"')
+            if (u.isEmpty() || u.startsWith("blob:") || u.startsWith("data:")) continue
+            val lu = u.lowercase()
+            try {
+                when {
+                    ".m3u8" in lu -> list.addAll(parseM3u8Variants(u, finalUrl))
+                    ".mpd" in lu -> dashSkipped++
+                    else -> {
+                        val (ct, len) = probeFile(u)
+                        if (ct.startsWith("video/") || Regex("\\.(mp4|webm|mov)(\\?|$)").containsMatchIn(lu)) {
+                            val ext = Regex("\\.(mp4|webm|mov)").find(lu)?.groupValues?.get(1)?.uppercase() ?: "VIDEO"
+                            val q = if (len > 0) "$ext · ${fmtSize(len)}" else "$ext · không rõ dung lượng"
+                            list.add(Variant(q, u, len, false, "file"))
+                        }
+                    }
+                }
+            } catch (e: Exception) { }
+        }
+        // Dự phòng tổng quát: rình request bằng WebView (bắt được mọi host nhúng)
+        if (list.isEmpty() && html.isNotEmpty()) {
+            setStatus("Bóc thường không ra, đang mở trình phát để bắt link (mất khoảng 15-25 giây)…")
+            val iframeUrls2 = Regex("<iframe[^>]+src\\s*=\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                .findAll(html).map { it.groupValues[1] }.distinct().take(2).toList()
+            for (f in iframeUrls2) {
+                val fu = resolveUrl(finalUrl, f)
+                if (fu.isEmpty() || fu == finalUrl) continue
+                val sniffed = sniffEmbedViaWebView(fu, finalUrl)
+                if (sniffed != null) {
+                    try {
+                        if (sniffed.lowercase().contains(".m3u8")) {
+                            list.addAll(parseM3u8Variants(sniffed, finalUrl))
+                        } else {
+                            val (ct, len) = probeFile(sniffed)
+                            val ext = Regex("\\.(mp4|webm|mov)").find(sniffed.lowercase())?.groupValues?.get(1)?.uppercase() ?: "VIDEO"
+                            val q = if (len > 0) "$ext · ${fmtSize(len)}" else ext
+                            list.add(Variant(q, sniffed, len, false, "file"))
+                        }
+                    } catch (e: Exception) { }
+                    if (list.isNotEmpty()) break
+                }
+            }
+        }
+        val seen = HashSet<String>()
+        val deduped = list.filter { seen.add(it.url) }
+            .sortedWith(compareByDescending<Variant> { if (it.kind == "file") 1 else 0 }.thenByDescending { it.size })
+        if (deduped.isEmpty() && dashSkipped > 0)
+            throw RuntimeException("Trang này chỉ có luồng DASH (chưa hỗ trợ ở bản này).")
+        return Triple(title, finalUrl, deduped)
+    }
+
+    private fun sniffWeb() {
+        val url = extractUrl(webLinkInput.text.toString())
+        if (url == null) {
+            webStatusLabel.text = "Chưa có link hợp lệ. Anh dán link trang web vào trước nhé."
+            return
+        }
+        webStatusLabel.text = "Đang đọc trang web…"
+        webVariantsBox.removeAllViews()
+        Thread {
+            try {
+                val (title, pageUrl, list) = sniffWebPage(url)
+                webTitle = title
+                webPageUrl = pageUrl
+                webVariants = list
+                runOnUiThread {
+                    if (list.isEmpty()) {
+                        webStatusLabel.text = "Không tìm thấy video nào trong trang này. (Trang kiểu app/chặn bot có thể không bóc được.)"
+                    } else {
+                        webStatusLabel.text = "Tìm thấy ${list.size} video/luồng trong trang \"$title\". Bấm Tải ở mục muốn lấy:"
+                        renderWebVariants()
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread { webStatusLabel.text = "Lỗi: ${e.message}" }
+            }
+        }.start()
+    }
+
+    private fun renderWebVariants() {
+        webVariantsBox.removeAllViews()
+        webVariantsBox.addView(label("Các video/luồng tìm được (bấm Tải ở mục muốn lấy):"))
+        for (v in webVariants) {
+            val name = if (v.kind == "hls") "📡 ${v.quality.uppercase()}" else "🎬 ${v.quality.uppercase()}"
+            val b = btn("$name — Tải", -1) { downloadWeb(v) }
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            lp.setMargins(0, dp(3), 0, dp(3))
+            webVariantsBox.addView(b, lp)
+        }
+    }
+
+    // ---------- Tải luồng HLS (m3u8): tải từng đoạn rồi nối lại ----------
+    private fun hlsDownload(playlistUrl: String, dest: File, job: DownloadJob): Boolean {
+        return try {
+            val referer = job.referer.ifEmpty { "https://www.douyin.com/" }
+            var mediaPlaylistUrl = playlistUrl
+            var text = httpGetWithReferer(playlistUrl, referer)
+            var lines = text.lines()
+            if (lines.any { it.startsWith("#EXT-X-STREAM-INF") }) {
+                var bestUrl = ""
+                var bestBw = -1L
+                var bw = 0L
+                for (line in lines) {
+                    if (line.startsWith("#EXT-X-STREAM-INF")) {
+                        bw = Regex("BANDWIDTH=(\\d+)").find(line)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                    } else if (line.isNotBlank() && !line.startsWith("#")) {
+                        if (bw >= bestBw) {
+                            bestBw = bw
+                            bestUrl = resolveUrl(playlistUrl, line.trim())
+                        }
+                        bw = 0L
+                    }
+                }
+                if (bestUrl.isEmpty()) return false
+                mediaPlaylistUrl = bestUrl
+                text = httpGetWithReferer(bestUrl, referer)
+                lines = text.lines()
+            }
+            if (lines.any { it.startsWith("#EXT-X-KEY") && !it.contains("METHOD=NONE") }) {
+                setJobState(job, "❌ Luồng mã hoá, bản này chưa hỗ trợ.")
+                return false
+            }
+            val segUrls = lines.filter { it.isNotBlank() && !it.startsWith("#") }
+                .map { resolveUrl(mediaPlaylistUrl, it.trim()) }
+            if (segUrls.isEmpty()) return false
+            val partFiles = arrayOfNulls<File>(segUrls.size)
+            val totalBytes = AtomicLong(0)
+            val totalEst = AtomicLong(0)
+            val errors = AtomicInteger(0)
+            job.total = -1
+            job.done = 0
+            val threads = mutableListOf<Thread>()
+            for (t in 0 until 4) {
+                threads += Thread {
+                    var i = t
+                    while (i < segUrls.size) {
+                        try {
+                            val conn = openConn(proxied(segUrls[i]), null, referer)
+                            if (conn.responseCode !in 200..299) {
+                                errors.incrementAndGet()
+                                conn.disconnect()
+                                i += 4
+                                continue
+                            }
+                            val len = conn.contentLengthLong
+                            if (len > 0) {
+                                totalEst.addAndGet(len)
+                                job.total = totalEst.get()
+                            }
+                            val part = File(cacheDir, "hls_${job.id}_$i.ts")
+                            conn.inputStream.use { input ->
+                                FileOutputStream(part).use { out ->
+                                    val buf = ByteArray(256 * 1024)
+                                    while (true) {
+                                        val n = input.read(buf)
+                                        if (n < 0) break
+                                        out.write(buf, 0, n)
+                                        val d = totalBytes.addAndGet(n.toLong())
+                                        job.done = d
+                                        updateJobProgress(job)
+                                    }
+                                }
+                            }
+                            conn.disconnect()
+                            partFiles[i] = part
+                        } catch (e: Exception) {
+                            errors.incrementAndGet()
+                        }
+                        i += 4
+                    }
+                }
+            }
+            threads.forEach { it.start() }
+            threads.forEach { it.join() }
+            var ok = errors.get() == 0
+            for (i in segUrls.indices) {
+                if (partFiles[i] == null || !partFiles[i]!!.exists()) { ok = false; break }
+            }
+            if (!ok) {
+                for (f in partFiles) { try { f?.delete() } catch (e: Exception) { } }
+                return false
+            }
+            FileOutputStream(dest).use { out ->
+                for (i in segUrls.indices) {
+                    partFiles[i]!!.inputStream().use { it.copyTo(out) }
+                    partFiles[i]!!.delete()
+                }
+            }
+            job.done = totalBytes.get()
+            job.total = totalBytes.get()
+            updateJobProgress(job)
+            true
         } catch (e: Exception) {
-            toast("Tải lỗi: ${e.message}")
+            false
         }
     }
 
-    private fun toast(msg: String) {
-        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    // ---------- Download queue: up to 3 files at once ----------
+    private fun download(v: Variant) {
+        enqueueDownload(v, currentTitle.ifEmpty { "video" }, variants, "")
     }
 
-    // ---------- Tay cam roi: phim cung ----------
-    // A = nhay, B = ban; Y = A, X = B (nut thuong, khong turbo)
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        val bit = when (event.keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP -> BTN_UP
-            KeyEvent.KEYCODE_DPAD_DOWN -> BTN_DOWN
-            KeyEvent.KEYCODE_DPAD_LEFT -> BTN_LEFT
-            KeyEvent.KEYCODE_DPAD_RIGHT -> BTN_RIGHT
-            KeyEvent.KEYCODE_BUTTON_A -> BTN_A
-            KeyEvent.KEYCODE_BUTTON_Y -> BTN_A
-            KeyEvent.KEYCODE_BUTTON_B -> BTN_B
-            KeyEvent.KEYCODE_BUTTON_X -> BTN_B
-            KeyEvent.KEYCODE_BUTTON_START -> BTN_START
-            KeyEvent.KEYCODE_BUTTON_SELECT -> BTN_SELECT
-            else -> 0
+    private fun downloadWeb(v: Variant) {
+        if (enqueueDownload(v, webTitle.ifEmpty { "video" }, webVariants, webPageUrl)) {
+            Toast.makeText(this, "Đã thêm vào hàng đợi. Qua tab Tải video để xem tiến trình nhé.", Toast.LENGTH_LONG).show()
         }
-        if (bit == 0) return super.dispatchKeyEvent(event)
-        when (event.action) {
-            KeyEvent.ACTION_DOWN -> padMask = padMask or bit
-            KeyEvent.ACTION_UP -> padMask = padMask and bit.inv()
+    }
+
+    private fun enqueueDownload(v: Variant, title: String, source: List<Variant>, referer: String): Boolean {
+        if (accelOn && workerUrl.isEmpty()) {
+            Toast.makeText(this, "Nút tăng tốc đang bật nhưng chưa có địa chỉ máy chủ — tắt nút hoặc triển khai Worker trước nhé", Toast.LENGTH_LONG).show()
+            return false
         }
+        val job = DownloadJob(nextJobId++, title, v, referer = referer, source = source)
+        runOnUiThread { addJobRow(job) }
+        synchronized(queueLock) { jobQueue.addLast(job) }
+        processQueue()
         return true
     }
 
-    // ---------- Tay cam roi: can analog + hat ----------
-    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
-        if ((event.source and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK &&
-            event.action == MotionEvent.ACTION_MOVE) {
-            var m = 0
-            val ax = axisValue(event, MotionEvent.AXIS_X)
-            val ay = axisValue(event, MotionEvent.AXIS_Y)
-            val hx = axisValue(event, MotionEvent.AXIS_HAT_X)
-            val hy = axisValue(event, MotionEvent.AXIS_HAT_Y)
-            if (ax < -0.4f || hx < -0.5f) m = m or BTN_LEFT
-            if (ax > 0.4f || hx > 0.5f) m = m or BTN_RIGHT
-            if (ay < -0.4f || hy < -0.5f) m = m or BTN_UP
-            if (ay > 0.4f || hy > 0.5f) m = m or BTN_DOWN
-            motionMask = m
-            return true
-        }
-        return super.dispatchGenericMotionEvent(event)
+    private fun addJobRow(job: DownloadJob) {
+        downloadsLabel.visibility = View.VISIBLE
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(0, dp(6), 0, dp(6))
+        val titleTv = label("${job.title.take(60)} · bản ${job.variant.quality}", 13f)
+        titleTv.setTextColor(Color.WHITE)
+        box.addView(titleTv)
+        val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+        bar.max = 100
+        bar.progress = 0
+        bar.progressTintList = ColorStateList.valueOf(accent)
+        box.addView(bar)
+        val statusTv = label(job.state, 12f)
+        box.addView(statusTv)
+        val retryBtn = btn("↻ Tải lại") { retryJob(job) }
+        retryBtn.visibility = View.GONE
+        box.addView(retryBtn)
+        jobRows[job.id] = JobRow(bar, statusTv, retryBtn)
+        downloadsBox.addView(box)
     }
 
-    private fun axisValue(event: MotionEvent, axis: Int): Float {
-        val device = event.device ?: return event.getAxisValue(axis)
-        val range = device.getMotionRange(axis, event.source) ?: return event.getAxisValue(axis)
-        val v = event.getAxisValue(axis)
-        return if (abs(v) < range.flat) 0f else v
+    private fun retryJob(job: DownloadJob) {
+        job.done = 0
+        job.total = -1
+        job.lastPct = -1
+        job.state = "Đang chờ…"
+        runOnUiThread {
+            jobRows[job.id]?.let {
+                it.bar.progress = 0
+                it.status.text = job.state
+                it.status.setTextColor(Color.rgb(215, 215, 220))
+                it.retry.visibility = View.GONE
+            }
+        }
+        synchronized(queueLock) { jobQueue.addLast(job) }
+        processQueue()
     }
 
-    // ---------- Man hinh game + tay cam cam ung ----------
-    inner class GameView(ctx: Context) : View(ctx) {
-        private val bmp = Bitmap.createBitmap(256, 240, Bitmap.Config.ARGB_8888)
-        private val fbPaint = Paint().apply { isFilterBitmap = false }
-        private val srcRect = Rect(0, 0, 256, 240)
-        private val dstRect = Rect()
-        private val shapePaint = Paint(Paint.ANTI_ALIAS_FLAG)
-        private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            color = Color.argb(230, 255, 210, 60)
-            strokeWidth = 2f
+    private fun processQueue() {
+        synchronized(queueLock) {
+            while (activeJobs < maxConcurrent && jobQueue.isNotEmpty()) {
+                val job = jobQueue.removeFirst()
+                activeJobs++
+                Thread {
+                    try { runJob(job) } finally {
+                        synchronized(queueLock) { activeJobs-- }
+                        processQueue()
+                    }
+                }.start()
+            }
         }
-        private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textAlign = Paint.Align.CENTER
+    }
+
+    private fun setJobState(job: DownloadJob, state: String) {
+        job.state = state
+        runOnUiThread {
+            jobRows[job.id]?.let {
+                it.status.text = state
+                when {
+                    state.startsWith("✅") -> it.status.setTextColor(Color.rgb(120, 220, 130))
+                    state.startsWith("❌") -> {
+                        it.status.setTextColor(Color.rgb(255, 120, 120))
+                        it.retry.visibility = View.VISIBLE
+                    }
+                    else -> it.status.setTextColor(Color.rgb(215, 215, 220))
+                }
+            }
         }
+    }
 
-        private var d = 1f
-
-        // Keo tha trong che do di chuyen nut
-        private var dragKey: String? = null
-        private var dragStartX = 0f
-        private var dragStartY = 0f
-        private var dragOrigX = 0f
-        private var dragOrigY = 0f
-
-        override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-            super.onSizeChanged(w, h, oldw, oldh)
-            d = resources.displayMetrics.density
-            strokePaint.strokeWidth = 2f * d
+    private fun updateJobProgress(job: DownloadJob) {
+        if (job.total <= 0) return
+        val pct = (job.done * 100 / job.total).toInt().coerceIn(0, 100)
+        if (pct == job.lastPct) return
+        job.lastPct = pct
+        runOnUiThread {
+            jobRows[job.id]?.let {
+                it.bar.progress = pct
+                it.status.text = "${job.state} $pct% (${fmtSize(job.done)}/${fmtSize(job.total)})"
+            }
         }
+    }
 
-        // ----- Bo cuc: vi tri goc + offset nguoi dung, kich co theo uiScale -----
-        private fun off(key: String): FloatArray = ctlOffsets[key] ?: floatArrayOf(0f, 0f)
-        private fun dpadCx(): Float = 108f * d + off("dpad")[0]
-        private fun dpadCy(): Float = height - 108f * d + off("dpad")[1]
-        private fun arm(): Float = 60f * d * uiScale
-        private fun armW(): Float = 22f * d * uiScale
-        private fun aCx(): Float = width - 62f * d + off("a")[0]
-        private fun aCy(): Float = height - 92f * d + off("a")[1]
-        private fun bCx(): Float = width - 152f * d + off("b")[0]
-        private fun bCy(): Float = height - 62f * d + off("b")[1]
-        private fun btnR(): Float = 33f * d * uiScale
-        private fun selRect(): RectF {
-            val cx = width / 2f - 70f * d + off("sel")[0]
-            val cy = height - 29f * d + off("sel")[1]
-            val w = 112f * d * uiScale
-            val h = 26f * d * uiScale
-            return RectF(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
-        }
-        private fun startRect(): RectF {
-            val cx = width / 2f + 70f * d + off("start")[0]
-            val cy = height - 29f * d + off("start")[1]
-            val w = 112f * d * uiScale
-            val h = 26f * d * uiScale
-            return RectF(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            super.onDraw(canvas)
-            canvas.drawColor(Color.BLACK)
-            if (nes.romLoaded) {
-                bmp.setPixels(nes.ppu.frameBuffer, 0, 256, 0, 0, 256, 240)
-                val scale = minOf(width / 256f, height / 240f)
-                val w = (256 * scale).toInt()
-                val h = (240 * scale).toInt()
-                dstRect.set((width - w) / 2, (height - h) / 2, (width + w) / 2, (height + h) / 2)
-                canvas.drawBitmap(bmp, srcRect, dstRect, fbPaint)
+    private fun runJob(job: DownloadJob) {
+        val others = job.source
+            .filter { it.url != job.variant.url && !it.isAudio && it.kind == job.variant.kind && labelScore(it.quality) >= 0 }
+            .sortedWith(compareByDescending<Variant> { labelScore(it.quality) }.thenByDescending { it.size })
+        val candidates = listOf(job.variant) + others
+        var ok = false
+        for (cand in candidates) {
+            setJobState(job, "Đang tải bản ${cand.quality}…")
+            val tmp = File(cacheDir, "dl_${job.id}.${if (cand.isAudio) "mp3" else "mp4"}")
+            if (tmp.exists()) tmp.delete()
+            val success = if (cand.kind == "hls") hlsDownload(proxied(cand.url), tmp, job) else segmentedDownload(proxied(cand.url), tmp, job)
+            if (success) {
+                val saved = saveToMedia(tmp, cand)
+                tmp.delete()
+                addHistory(job.title, cand, saved)
+                runOnUiThread { jobRows[job.id]?.bar?.progress = 100 }
+                setJobState(job, "✅ Xong — $saved")
+                ok = true
+                break
             } else {
-                labelPaint.textSize = 15f * d
-                canvas.drawText("Bấm nút ROM ở góc trên để chọn game .nes", width / 2f, height / 2f, labelPaint)
+                tmp.delete()
+                if (cand.url != candidates.last().url) {
+                    setJobState(job, "Máy chủ này chậm/lỗi, đang đổi máy chủ khác…")
+                }
             }
-            drawControls(canvas)
-            if (moveMode) drawMoveHints(canvas)
         }
-
-        private fun drawControls(canvas: Canvas) {
-            val cx = dpadCx(); val cy = dpadCy()
-            val a = arm(); val aw = armW()
-            // D-pad: chu thap 4 huong
-            shapePaint.color = Color.argb(70, 255, 255, 255)
-            canvas.drawRect(cx - aw, cy - a, cx + aw, cy + a, shapePaint)
-            canvas.drawRect(cx - a, cy - aw, cx + a, cy + aw, shapePaint)
-            shapePaint.color = Color.argb(150, 255, 255, 255)
-            val dz = a * 0.55f
-            if ((touchMask and BTN_UP) != 0) canvas.drawCircle(cx, cy - dz, aw * 0.85f, shapePaint)
-            if ((touchMask and BTN_DOWN) != 0) canvas.drawCircle(cx, cy + dz, aw * 0.85f, shapePaint)
-            if ((touchMask and BTN_LEFT) != 0) canvas.drawCircle(cx - dz, cy, aw * 0.85f, shapePaint)
-            if ((touchMask and BTN_RIGHT) != 0) canvas.drawCircle(cx + dz, cy, aw * 0.85f, shapePaint)
-
-            // Chi 2 nut hanh dong: A (nhay), B (ban)
-            drawButton(canvas, aCx(), aCy(), "A", (touchMask and BTN_A) != 0)
-            drawButton(canvas, bCx(), bCy(), "B", (touchMask and BTN_B) != 0)
-
-            // Select / Start
-            val sr = selRect(); val tr = startRect()
-            shapePaint.color = Color.argb(if ((touchMask and BTN_SELECT) != 0) 170 else 80, 255, 255, 255)
-            canvas.drawRoundRect(sr, 10f * d, 10f * d, shapePaint)
-            shapePaint.color = Color.argb(if ((touchMask and BTN_START) != 0) 170 else 80, 255, 255, 255)
-            canvas.drawRoundRect(tr, 10f * d, 10f * d, shapePaint)
-            labelPaint.textSize = 10f * d * uiScale
-            canvas.drawText("SELECT", sr.centerX(), sr.centerY() + 4f * d, labelPaint)
-            canvas.drawText("START", tr.centerX(), tr.centerY() + 4f * d, labelPaint)
+        if (!ok) {
+            setJobState(job, "❌ Tải lỗi. Bấm Tải lại hoặc quét lại link mới.")
         }
+    }
 
-        private fun drawButton(canvas: Canvas, cx: Float, cy: Float, label: String, pressed: Boolean) {
-            shapePaint.color = if (pressed) Color.argb(200, 255, 210, 60) else Color.argb(90, 255, 90, 90)
-            canvas.drawCircle(cx, cy, btnR(), shapePaint)
-            labelPaint.textSize = 19f * d * uiScale
-            canvas.drawText(label, cx, cy + 6f * d * uiScale, labelPaint)
+    // ---------- Parallel segmented download (multi-connection) ----------
+    private fun openConn(url: String, range: String? = null, referer: String = "https://www.douyin.com/"): HttpURLConnection {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.setRequestProperty("User-Agent", uaString)
+        conn.setRequestProperty("Referer", referer)
+        if (range != null) conn.setRequestProperty("Range", range)
+        conn.connectTimeout = 15000
+        conn.readTimeout = 30000
+        conn.instanceFollowRedirects = true
+        return conn
+    }
+
+    private fun downloadRange(url: String, start: Long, end: Long, dest: File, doneAtomic: AtomicLong, job: DownloadJob): Boolean {
+        return try {
+            val conn = openConn(url, "bytes=$start-$end", job.referer.ifEmpty { "https://www.douyin.com/" })
+            if (conn.responseCode != 206) return false
+            conn.inputStream.use { input ->
+                RandomAccessFile(dest, "rw").use { raf ->
+                    raf.seek(start)
+                    val buf = ByteArray(256 * 1024)
+                    var pos = start
+                    while (pos <= end) {
+                        val n = input.read(buf, 0, minOf(buf.size.toLong(), end - pos + 1).toInt())
+                        if (n < 0) break
+                        raf.write(buf, 0, n)
+                        pos += n
+                        val d = doneAtomic.addAndGet(n.toLong())
+                        job.done = d
+                        updateJobProgress(job)
+                    }
+                    pos > end
+                }
+            }
+        } catch (e: Exception) {
+            false
         }
+    }
 
-        private fun drawMoveHints(canvas: Canvas) {
-            val cx = dpadCx(); val cy = dpadCy(); val a = arm()
-            canvas.drawRect(cx - a, cy - a, cx + a, cy + a, strokePaint)
-            canvas.drawCircle(aCx(), aCy(), btnR(), strokePaint)
-            canvas.drawCircle(bCx(), bCy(), btnR(), strokePaint)
-            canvas.drawRoundRect(selRect(), 10f * d, 10f * d, strokePaint)
-            canvas.drawRoundRect(startRect(), 10f * d, 10f * d, strokePaint)
-            labelPaint.textSize = 13f * d
-            canvas.drawText("Đang di chuyển nút: kéo thả từng nút tới vị trí mong muốn",
-                width / 2f, 30f * d, labelPaint)
+    private fun streamDownload(url: String, dest: File, job: DownloadJob): Boolean {
+        return try {
+            val conn = openConn(url, null, job.referer.ifEmpty { "https://www.douyin.com/" })
+            if (conn.responseCode !in 200..299) return false
+            job.total = conn.contentLengthLong
+            conn.inputStream.use { input ->
+                FileOutputStream(dest).use { out ->
+                    val buf = ByteArray(256 * 1024)
+                    var done = 0L
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        done += n
+                        job.done = done
+                        updateJobProgress(job)
+                    }
+                }
+            }
+            true
+        } catch (e: Exception) {
+            false
         }
+    }
 
-        // D-pad don gian: 4 vung doc lap, moi diem cham cho toi da 1 huong
-        private fun dpadDirection(px: Float, py: Float): Int {
-            val dx = px - dpadCx()
-            val dy = py - dpadCy()
-            val a = arm(); val aw = armW()
-            if (abs(dx) > a || abs(dy) > a) return 0
-            val dead = 7f * d
-            if (abs(dx) < dead && abs(dy) < dead) return 0
-            val inVerticalArm = abs(dx) <= aw
-            val inHorizontalArm = abs(dy) <= aw
-            if (inVerticalArm && abs(dy) > dead) return if (dy < 0) BTN_UP else BTN_DOWN
-            if (inHorizontalArm && abs(dx) > dead) return if (dx < 0) BTN_LEFT else BTN_RIGHT
-            // Goc cheo: lay huong manh hon (van chi 1 huong)
-            return if (abs(dx) > abs(dy)) {
-                if (dx < 0) BTN_LEFT else BTN_RIGHT
+    private fun segmentedDownload(url: String, dest: File, job: DownloadJob): Boolean {
+        var total = -1L
+        try {
+            val probe = openConn(url, "bytes=0-0", job.referer.ifEmpty { "https://www.douyin.com/" })
+            if (probe.responseCode == 206) {
+                val cr = probe.getHeaderField("Content-Range")
+                total = cr?.substringAfter('/')?.toLongOrNull() ?: -1
+            }
+            probe.disconnect()
+        } catch (e: Exception) { }
+        if (total <= 0) return streamDownload(url, dest, job)
+        job.total = total
+        job.done = 0
+        job.lastPct = -1
+        val segments = when {
+            total < 2_000_000 -> 2
+            total < 10_000_000 -> 6
+            else -> 8
+        }
+        try {
+            RandomAccessFile(dest, "rw").use { it.setLength(total) }
+        } catch (e: Exception) { return false }
+        val doneAtomic = AtomicLong(0)
+        val errors = AtomicInteger(0)
+        val threads = mutableListOf<Thread>()
+        for (s in 0 until segments) {
+            val start = total * s / segments
+            val end = if (s == segments - 1) total - 1 else total * (s + 1) / segments - 1
+            threads += Thread {
+                var ok = false
+                for (attempt in 0 until 3) {
+                    if (downloadRange(url, start, end, dest, doneAtomic, job)) { ok = true; break }
+                }
+                if (!ok) errors.incrementAndGet()
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+        return errors.get() == 0 && dest.exists() && dest.length() == total
+    }
+
+    // ---------- Save to gallery / history ----------
+    private fun saveToMedia(file: File, v: Variant): String {
+        val stamp = System.currentTimeMillis()
+        return if (Build.VERSION.SDK_INT >= 29) {
+            if (v.isAudio) {
+                val name = "SaveGo_$stamp.mp3"
+                val values = ContentValues().apply {
+                    put(MediaStore.Audio.Media.DISPLAY_NAME, name)
+                    put(MediaStore.Audio.Media.MIME_TYPE, "audio/mpeg")
+                    put(MediaStore.Audio.Media.RELATIVE_PATH, "Music/SaveGo")
+                    put(MediaStore.Audio.Media.IS_PENDING, 1)
+                }
+                val uri = contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values)
+                    ?: throw RuntimeException("Không tạo được file trong thư viện")
+                contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
+                values.clear()
+                values.put(MediaStore.Audio.Media.IS_PENDING, 0)
+                contentResolver.update(uri, values, null, null)
+                "Nhạc/SaveGo/$name"
             } else {
-                if (dy < 0) BTN_UP else BTN_DOWN
+                val name = "SaveGo_$stamp.mp4"
+                val values = ContentValues().apply {
+                    put(MediaStore.Video.Media.DISPLAY_NAME, name)
+                    put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                    put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/SaveGo")
+                    put(MediaStore.Video.Media.IS_PENDING, 1)
+                }
+                val uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+                    ?: throw RuntimeException("Không tạo được file trong thư viện")
+                contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
+                values.clear()
+                values.put(MediaStore.Video.Media.IS_PENDING, 0)
+                contentResolver.update(uri, values, null, null)
+                "Phim/SaveGo/$name"
+            }
+        } else {
+            val dir = File(getExternalFilesDir(Environment.DIRECTORY_MOVIES), "SaveGo")
+            dir.mkdirs()
+            val dest = File(dir, if (v.isAudio) "SaveGo_$stamp.mp3" else "SaveGo_$stamp.mp4")
+            file.copyTo(dest, overwrite = true)
+            dest.absolutePath
+        }
+    }
+
+    private fun addHistory(title: String, v: Variant, savedName: String) {
+        try {
+            val prefs = getSharedPreferences("savego", Context.MODE_PRIVATE)
+            val arr = JSONArray(prefs.getString("history_json", "[]"))
+            val entry = JSONObject()
+            entry.put("title", title)
+            entry.put("quality", v.quality)
+            entry.put("size", v.size)
+            entry.put("file", savedName)
+            entry.put("time", System.currentTimeMillis())
+            val newArr = JSONArray()
+            newArr.put(entry)
+            var i = 0
+            while (i < arr.length() && newArr.length() < 50) {
+                newArr.put(arr.get(i))
+                i++
+            }
+            prefs.edit().putString("history_json", newArr.toString()).apply()
+        } catch (e: Exception) { }
+    }
+
+    // ---------- Douyin API (moi, trong Cai dat — mac dinh TAT) ----------
+    // Port kieu client tu repo Evil0ctal/Douyin_TikTok_Download_API v5:
+    // v5 goc can ky a_bogus + identity qua browser/server (Docker, Postgres,
+    // Redis) nen khong port thang sang dien thoai duoc; ban nay goi demo API
+    // cong khai cua chinh repo do (demo.douyin.wtf, tai khoan demo cong khai
+    // theo docs cua repo), chi doc, co gioi han request. Loi thi tu ve cach cu.
+    private fun apiHttp(url: String, method: String, body: String?): Pair<Int, String> {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.requestMethod = method
+        conn.setRequestProperty("User-Agent", uaString)
+        conn.connectTimeout = 20000
+        conn.readTimeout = 90000
+        conn.instanceFollowRedirects = true
+        if (body != null) {
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+        }
+        val code = conn.responseCode
+        val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() } ?: ""
+        conn.disconnect()
+        return Pair(code, text)
+    }
+
+    private fun douyinApiLogin() {
+        val (code, text) = apiHttp("$douyinApiBase/api/v1/auth/login", "POST", "{\"username\":\"demo\",\"password\":\"kelp-kelp-delta-3690\"}")
+        if (code !in 200..299 || !JSONObject(text).optBoolean("success", false)) throw RuntimeException("Không đăng nhập được Douyin API demo ($code)")
+        apiLoggedIn = true
+    }
+
+    private fun douyinApiEnsureLogin() {
+        if (!apiLoggedIn) douyinApiLogin()
+    }
+
+    // Tra ve data cua 1 lan goi API (tu dang nhap lai 1 lan neu het phien).
+    private fun douyinApiData(method: String, path: String, body: String?): JSONObject {
+        douyinApiEnsureLogin()
+        var (code, text) = apiHttp("$douyinApiBase$path", method, body)
+        if (code == 401) {
+            apiLoggedIn = false
+            douyinApiLogin()
+            val r = apiHttp("$douyinApiBase$path", method, body)
+            code = r.first; text = r.second
+        }
+        if (code !in 200..299) {
+            // API demo gioi han wait toi da 30 (gui wait=60 la tra 400 INVALID_PARAM);
+            // bao ro cho anh hieu thay vi hien so loi tho.
+            val detail = try {
+                JSONObject(text).optJSONObject("error")?.optString("message", "") ?: ""
+            } catch (e: Exception) { "" }
+            if (code == 400) throw RuntimeException("Douyin API không nhận link này (lỗi 400${if (detail.isNotEmpty()) ": $detail" else ""}). Anh dán link kênh douyin.com/user/… hoặc link 1 video của kênh nhé.")
+            throw RuntimeException("Douyin API trả lỗi $code")
+        }
+        val root = JSONObject(text)
+        if (!root.optBoolean("success", false)) throw RuntimeException(root.optJSONObject("error")?.optString("message") ?: "Douyin API lỗi")
+        return root.optJSONObject("data") ?: throw RuntimeException("Douyin API không trả dữ liệu")
+    }
+
+    private fun douyinApiParse(shareUrl: String): JSONObject {
+        val body = JSONObject().put("url", shareUrl).toString()
+        return douyinApiData("POST", "/api/v1/parse?wait=30", body)
+    }
+
+    private fun apiStreamsToVariants(streams: JSONArray?): List<Variant> {
+        val list = mutableListOf<Variant>()
+        if (streams == null) return list
+        for (i in 0 until streams.length()) {
+            val s = streams.optJSONObject(i) ?: continue
+            if (s.optBoolean("watermark", true)) continue
+            val u = s.optString("url", "")
+            if (u.isEmpty()) continue
+            val w = s.optInt("width", 0)
+            list.add(Variant(if (w > 0) "${w}p · API" else "Video · API", u, s.optLong("size_bytes", 0L), false, "file"))
+        }
+        return list.sortedByDescending { Regex("(\\d+)p").find(it.quality)?.groupValues?.get(1)?.toIntOrNull() ?: 0 }
+    }
+
+    private fun scanViaDouyinApi(shareUrl: String): Triple<String, String, List<Variant>> {
+        setStatus("Đang hỏi Douyin API (bản không logo)…")
+        val data = douyinApiParse(shareUrl)
+        val title = data.optString("title", "video").ifEmpty { "video" }
+        val media = data.optJSONObject("media")
+        var thumb = ""
+        val covers = media?.optJSONArray("covers")
+        if (covers != null && covers.length() > 0) thumb = covers.optJSONObject(0)?.optString("url", "") ?: ""
+        var list = apiStreamsToVariants(media?.optJSONArray("streams"))
+        if (list.isEmpty()) {
+            val v = media?.optJSONObject("video")
+            val u = v?.optString("url", "") ?: ""
+            if (u.isNotEmpty() && v?.optBoolean("watermark", true) == false) {
+                list = listOf(Variant("Video · API", u, v.optLong("size_bytes", 0L), false, "file"))
             }
         }
+        if (list.isEmpty()) throw RuntimeException("Douyin API không trả bản video không logo")
+        return Triple(title, thumb, list)
+    }
 
-        private fun hitControl(px: Float, py: Float): String? {
-            val m = 10f * d
-            var dx = px - aCx(); var dy = py - aCy()
-            if (dx * dx + dy * dy <= (btnR() + m) * (btnR() + m)) return "a"
-            dx = px - bCx(); dy = py - bCy()
-            if (dx * dx + dy * dy <= (btnR() + m) * (btnR() + m)) return "b"
-            if (selRect().contains(px, py)) return "sel"
-            if (startRect().contains(px, py)) return "start"
-            if (abs(px - dpadCx()) <= arm() && abs(py - dpadCy()) <= arm()) return "dpad"
-            return null
+    // 1 trang video cua kenh: tra ve (danh sach video, cursor trang sau, con trang sau khong).
+    // Cover: media.covers[0].url (anh 323:430), du phong cac cover sau.
+    private fun fetchChannelPostsPage(secUid: String, cursor: Long): Triple<List<ChannelVideo>, Long, Boolean> {
+        val enc = URLEncoder.encode(secUid, "UTF-8")
+        val cur = if (cursor > 0) "&cursor=$cursor" else ""
+        val data = douyinApiData("GET", "/api/v1/douyin/user/posts?sec_user_id=$enc&count=20&wait=30$cur", null)
+        val items = data.optJSONArray("items") ?: throw RuntimeException("Không có video nào")
+        val out = mutableListOf<ChannelVideo>()
+        for (i in 0 until items.length()) {
+            val it = items.optJSONObject(i) ?: continue
+            val title = it.optString("title", "video").ifEmpty { "video" }
+            val dur = it.optLong("duration_ms", 0L)
+            val media = it.optJSONObject("media")
+            val covers = media?.optJSONArray("covers")
+            var cover = ""
+            if (covers != null) {
+                for (j in 0 until covers.length()) {
+                    val u = covers.optJSONObject(j)?.optString("url", "") ?: ""
+                    if (u.isNotEmpty()) { cover = u; break }
+                }
+            }
+            val best = apiStreamsToVariants(media?.optJSONArray("streams")).firstOrNull() ?: continue
+            out.add(ChannelVideo(title, best, dur, cover))
         }
+        var nextCursor = data.optLong("cursor", 0L)
+        if (nextCursor == 0L) nextCursor = data.optString("cursor", "").toLongOrNull() ?: 0L
+        val hasMore = data.optBoolean("has_more", nextCursor > 0)
+        return Triple(out, nextCursor, hasMore)
+    }
 
-        override fun onTouchEvent(event: MotionEvent): Boolean {
-            if (moveMode) return onTouchMoveMode(event)
-            if (event.actionMasked == MotionEvent.ACTION_CANCEL) {
-                touchMask = 0
-                invalidate()
-                return true
+    private fun loadChannels(): MutableList<Pair<String, String>> {
+        val out = mutableListOf<Pair<String, String>>()
+        try {
+            val arr = JSONArray(getSharedPreferences("savego", Context.MODE_PRIVATE).getString("douyin_api_channels", "[]"))
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                out.add(Pair(o.optString("name"), o.optString("sec_uid")))
             }
-            val upPid = when (event.actionMasked) {
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP ->
-                    event.getPointerId(event.actionIndex)
-                else -> -1
-            }
-            // Cap nhat ngay trong su kien cham: quet toan bo pointer dang cham
-            var m = 0
-            val sr = selRect(); val tr = startRect()
-            val rr = btnR() + 8f * d
-            for (i in 0 until event.pointerCount) {
-                val pid = event.getPointerId(i)
-                if (pid == upPid) continue
-                val px = event.getX(i)
-                val py = event.getY(i)
-                m = m or dpadDirection(px, py)
-                var dx = px - aCx(); var dy = py - aCy()
-                if (dx * dx + dy * dy <= rr * rr) m = m or BTN_A
-                dx = px - bCx(); dy = py - bCy()
-                if (dx * dx + dy * dy <= rr * rr) m = m or BTN_B
-                if (sr.contains(px, py)) m = m or BTN_SELECT
-                if (tr.contains(px, py)) m = m or BTN_START
-            }
-            touchMask = m
-            invalidate()
-            return true
+        } catch (e: Exception) { }
+        return out
+    }
+
+    private fun saveChannels(list: List<Pair<String, String>>) {
+        val arr = JSONArray()
+        for ((n, s) in list) {
+            val o = JSONObject()
+            o.put("name", n)
+            o.put("sec_uid", s)
+            arr.put(o)
         }
+        getSharedPreferences("savego", Context.MODE_PRIVATE).edit().putString("douyin_api_channels", arr.toString()).apply()
+    }
 
-        private fun onTouchMoveMode(event: MotionEvent): Boolean {
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    dragKey = hitControl(event.x, event.y)
-                    if (dragKey != null) {
-                        dragStartX = event.x
-                        dragStartY = event.y
-                        val o = off(dragKey!!)
-                        dragOrigX = o[0]
-                        dragOrigY = o[1]
-                    }
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val key = dragKey
-                    if (key != null) {
-                        ctlOffsets[key] = floatArrayOf(
-                            dragOrigX + (event.x - dragStartX),
-                            dragOrigY + (event.y - dragStartY))
-                        invalidate()
-                    }
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    if (dragKey != null) {
-                        dragKey = null
-                        saveUiPrefs()
-                    }
+    // Giai link rut gon (v.douyin.com/…) bang cach di theo redirect toi da 5 lan.
+    // Tra ve link cuoi cung, loi mang thi tra ve link goc de API tu xu ly.
+    private fun resolveShortLink(url: String): String {
+        var cur = url
+        try {
+            repeat(5) {
+                val conn = URL(cur).openConnection() as HttpURLConnection
+                conn.instanceFollowRedirects = false
+                conn.setRequestProperty("User-Agent", uaString)
+                conn.connectTimeout = 15000
+                conn.readTimeout = 15000
+                val code = conn.responseCode
+                val loc = conn.getHeaderField("Location") ?: ""
+                conn.disconnect()
+                if (code in 300..399 && loc.isNotEmpty()) {
+                    cur = try { URL(URL(cur), loc).toString() } catch (e: Exception) { loc }
+                } else {
+                    return cur
                 }
             }
-            return true
+        } catch (e: Exception) { }
+        return cur
+    }
+
+    // Nhan dien kenh tu bat ky dang dan nao anh hay dung:
+    // - ca doan chu Douyin copy ra ("TA的更多作品。 https://v.douyin.com/… 2@3.com :1pm")
+    //   -> chi lay URL dau tien trong doan, bo het chu xung quanh;
+    // - link rut gon v.douyin.com/… -> giai redirect ra link that;
+    // - link kenh douyin.com/user/MS4w… hoac iesdouyin.com/share/user/…;
+    // - link 1 video iesdouyin.com/share/video/<id>/ -> hoi API lay author.sec_uid.
+    // Tra ve (sec_uid, nickname). Luu y: API parse link KENH tra sec_uid o
+    // cap cao nhat cua data (khong phai trong "author" nhu link video).
+    private fun resolveSecUid(input: String): Pair<String, String> {
+        val url = extractUrl(input)
+            ?: throw RuntimeException("Không thấy link trong đoạn anh dán. Anh dán link kênh douyin.com/user/… hoặc link 1 video của kênh nhé.")
+        if (!url.contains("douyin.com")) {
+            throw RuntimeException("Link này không phải link Douyin. Anh dán link kênh douyin.com/user/… hoặc link 1 video của kênh nhé.")
+        }
+        val resolved = resolveShortLink(url)
+        // sec_uid co ngay trong link da giai (link kenh dang /user/MS4w…).
+        val m = Regex("MS4wLjAB[A-Za-z0-9_\\-]+").find(resolved)
+        if (m != null) {
+            var nick = ""
+            try {
+                val d = douyinApiParse(resolved)
+                nick = d.optString("nickname", "")
+                if (nick.isEmpty()) nick = d.optJSONObject("author")?.optString("nickname", "") ?: ""
+            } catch (e: Exception) { }
+            return Pair(m.value, nick)
+        }
+        // Con lai: link video hoac link kenh khong co sec_uid trong URL ->
+        // hoi API parse, doc sec_uid o ca 2 cho co the co.
+        val data = douyinApiParse(resolved)
+        val sec = data.optString("sec_uid", "").ifEmpty {
+            data.optJSONObject("author")?.optString("sec_uid", "") ?: ""
+        }
+        if (sec.isNotEmpty()) {
+            val nick = data.optString("nickname", "").ifEmpty {
+                data.optJSONObject("author")?.optString("nickname", "") ?: ""
+            }
+            return Pair(sec, nick)
+        }
+        throw RuntimeException("Không nhận ra kênh từ link này. Anh dán link kênh dạng douyin.com/user/… hoặc link 1 video của kênh đó.")
+    }
+
+    private fun updateApiToggleBtn() {
+        if (!::apiToggleBtn.isInitialized) return
+        if (douyinApiOn) {
+            apiToggleBtn.text = "📡 Douyin API (mới): BẬT"
+            apiToggleBtn.background = roundedBg(accent)
+            apiToggleBtn.setTextColor(Color.BLACK)
+            apiToggleBtn.setTypeface(null, Typeface.BOLD)
+        } else {
+            apiToggleBtn.text = "📡 Douyin API (mới): TẮT"
+            apiToggleBtn.background = roundedBg(bgBtn)
+            apiToggleBtn.setTextColor(Color.WHITE)
+            apiToggleBtn.setTypeface(null, Typeface.NORMAL)
+        }
+    }
+
+    private fun toggleDouyinApi() {
+        douyinApiOn = !douyinApiOn
+        getSharedPreferences("savego", Context.MODE_PRIVATE).edit().putBoolean("douyin_api_on", douyinApiOn).apply()
+        updateApiToggleBtn()
+        Toast.makeText(this, if (douyinApiOn) "Đã bật Douyin API — quét link Douyin sẽ thử API không logo trước, lỗi thì tự về cách cũ" else "Đã tắt Douyin API — dùng cách quét cũ như trước", Toast.LENGTH_LONG).show()
+    }
+
+    private fun updateClipboardToggleBtn() {
+        if (!::clipboardToggleBtn.isInitialized) return
+        if (clipboardAutoOn) {
+            clipboardToggleBtn.text = "📋 Tự nhận link từ clipboard: BẬT"
+            clipboardToggleBtn.background = roundedBg(accent)
+            clipboardToggleBtn.setTextColor(Color.BLACK)
+            clipboardToggleBtn.setTypeface(null, Typeface.BOLD)
+        } else {
+            clipboardToggleBtn.text = "📋 Tự nhận link từ clipboard: TẮT"
+            clipboardToggleBtn.background = roundedBg(bgBtn)
+            clipboardToggleBtn.setTextColor(Color.WHITE)
+            clipboardToggleBtn.setTypeface(null, Typeface.NORMAL)
+        }
+    }
+
+    private fun toggleClipboardAuto() {
+        clipboardAutoOn = !clipboardAutoOn
+        getSharedPreferences("savego", Context.MODE_PRIVATE).edit().putBoolean("clipboard_auto_on", clipboardAutoOn).apply()
+        updateClipboardToggleBtn()
+        Toast.makeText(this, if (clipboardAutoOn) "Đã bật tự nhận link — sao chép link Douyin rồi mở app là tự tìm luôn" else "Đã tắt tự nhận link — chỉ nhận link khi anh bấm Dán từ khay nhớ", Toast.LENGTH_LONG).show()
+    }
+
+    private fun renderChannelList() {
+        if (!::channelBox.isInitialized) return
+        channelBox.removeAllViews()
+        val list = loadChannels()
+        if (list.isEmpty()) {
+            channelBox.addView(label("Chưa lưu kênh nào. Dán link kênh ở trên rồi bấm Thêm kênh."))
+            return
+        }
+        for ((name, sec) in list) {
+            val box = LinearLayout(this)
+            box.orientation = LinearLayout.VERTICAL
+            box.background = roundedBg(bgPanel, 10)
+            box.setPadding(dp(8), dp(6), dp(8), dp(6))
+            val boxLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            boxLp.setMargins(0, dp(3), 0, dp(3))
+            val tv = label("• $name", 13f)
+            tv.setTextColor(Color.WHITE)
+            box.addView(row(tv, btn("Xoá") {
+                saveChannels(loadChannels().filter { it.second != sec })
+                renderChannelList()
+            }))
+            box.addView(row(btn("Lấy video mới") { fetchChannel(sec, name, false) }, btn("🔍 Quét cả kênh") { fetchChannel(sec, name, true) }))
+            channelBox.addView(box, boxLp)
+        }
+    }
+
+    private fun addChannel() {
+        val input = channelInput.text.toString()
+        val nameTyped = channelNameInput.text.toString().trim()
+        if (input.trim().isEmpty()) {
+            apiStatusLabel.text = "Dán link kênh Douyin vào ô trên trước đã."
+            return
+        }
+        apiStatusLabel.text = "Đang nhận diện kênh…"
+        Thread {
+            try {
+                val (sec, nick) = resolveSecUid(input)
+                val list = loadChannels()
+                if (list.any { it.second == sec }) {
+                    runOnUiThread { apiStatusLabel.text = "Kênh này đã lưu rồi." }
+                    return@Thread
+                }
+                list.add(Pair(if (nameTyped.isEmpty()) nick.ifEmpty { "Kênh mới" } else nameTyped, sec))
+                saveChannels(list)
+                runOnUiThread {
+                    channelInput.setText("")
+                    channelNameInput.setText("")
+                    apiStatusLabel.text = "Đã lưu kênh. Bấm Lấy video mới để xem video của kênh."
+                    renderChannelList()
+                }
+            } catch (e: Exception) {
+                runOnUiThread { apiStatusLabel.text = "Lỗi: ${e.message}" }
+            }
+        }.start()
+    }
+
+    // Lay video kenh: scanAll=false = 20 video moi nhat; scanAll=true = quet ca kenh
+    // theo cursor (20 video/trang, toi da 200 video/lan, nghi 1,5 giay giua cac trang
+    // de khoi vuot gioi han demo API 30 request/10 giay). Ket qua hien phan trang
+    // 20 video/trang, khong do ca kenh vao 1 danh sach dai.
+    private fun fetchChannel(secUid: String, name: String, scanAll: Boolean) {
+        if (!douyinApiOn) {
+            Toast.makeText(this, "Bật công tắc Douyin API ở trên trước đã nhé", Toast.LENGTH_LONG).show()
+            return
+        }
+        apiStatusLabel.text = if (scanAll) "Đang quét cả kênh $name (20 video/trang, đi chậm để khỏi bị API chặn)…" else "Đang lấy video mới của $name…"
+        channelVideosBox.removeAllViews()
+        selectedChannelVideos.clear()
+        Thread {
+            try {
+                val all = mutableListOf<ChannelVideo>()
+                var cursor = 0L
+                var page = 0
+                var stoppedReason = ""
+                while (true) {
+                    val (items, next, hasMore) = try {
+                        fetchChannelPostsPage(secUid, cursor)
+                    } catch (e: Exception) {
+                        // Quet ca kenh: demo API doi khi chan trang sau (can identity dang nhap);
+                        // giu lai video da lay duoc thay vi mat het.
+                        if (all.isNotEmpty()) { stoppedReason = e.message ?: "API lỗi"; break } else throw e
+                    }
+                    for (v in items) if (all.none { it.variant.url == v.variant.url }) all.add(v)
+                    page++
+                    if (!scanAll) break
+                    if (!hasMore || next <= 0L || next == cursor) break
+                    if (all.size >= 200) { stoppedReason = "Đã lấy đủ 200 video (giới hạn quét 1 lần)."; break }
+                    cursor = next
+                    val got = all.size
+                    runOnUiThread { apiStatusLabel.text = "Đang quét cả kênh $name… đã có $got video (trang $page)." }
+                    Thread.sleep(1500)
+                }
+                runOnUiThread {
+                    if (all.isEmpty()) {
+                        apiStatusLabel.text = "Kênh $name không có video nào."
+                        return@runOnUiThread
+                    }
+                    channelScanItems = all
+                    channelScanName = name
+                    channelScanPage = 0
+                    var msg = "Kênh $name: ${all.size} video" + if (scanAll) " (đã quét cả kênh)." else " mới nhất."
+                    msg += " Bấm Tải ở video muốn lấy (lưu về Phim/SaveGo), hoặc tick chọn rồi bấm Tải các video đã chọn."
+                    if (stoppedReason.isNotEmpty()) msg += " Lưu ý: dừng quét giữa chừng — $stoppedReason"
+                    apiStatusLabel.text = msg
+                    renderChannelVideosPage()
+                }
+            } catch (e: Exception) {
+                runOnUiThread { apiStatusLabel.text = "Lỗi lấy video của $name: ${e.message}" }
+            }
+        }.start()
+    }
+
+    private fun channelScanPageCount(): Int = maxOf(1, (channelScanItems.size + 19) / 20)
+
+    private fun updateDownloadSelectedBtn() {
+        downloadSelectedBtn?.text = "⬇ Tải các video đã chọn (${selectedChannelVideos.size})"
+    }
+
+    private fun downloadSelectedChannelVideos() {
+        if (selectedChannelVideos.isEmpty()) {
+            Toast.makeText(this, "Anh tick chọn video trước đã nhé", Toast.LENGTH_SHORT).show()
+            return
+        }
+        var n = 0
+        for (item in selectedChannelVideos.toList()) {
+            if (enqueueDownload(item.variant, item.title, listOf(item.variant), "https://www.douyin.com/")) n++
+        }
+        selectedChannelVideos.clear()
+        updateDownloadSelectedBtn()
+        renderChannelVideosPage()
+        Toast.makeText(this, "Đã thêm $n video vào hàng đợi. Qua tab Tải video để xem tiến trình.", Toast.LENGTH_LONG).show()
+    }
+
+    // Tai anh dai dien nho (cover cua API) vao ImageView, khong chan giao dien.
+    private fun loadChannelThumb(iv: ImageView, url: String) {
+        iv.tag = url
+        Thread {
+            try {
+                val conn = URL(url).openConnection() as HttpURLConnection
+                conn.setRequestProperty("User-Agent", uaString)
+                conn.connectTimeout = 15000
+                conn.readTimeout = 15000
+                val bmp = conn.inputStream.use { BitmapFactory.decodeStream(it) }
+                conn.disconnect()
+                if (bmp != null) runOnUiThread { if (iv.tag == url) iv.setImageBitmap(bmp) }
+            } catch (e: Exception) { }
+        }.start()
+    }
+
+    // Ve 1 trang ket qua quet kenh: 20 video/trang, co nut chuyen trang tren + duoi.
+    // Moi video: nut Tai rieng, ben duoi la anh vuong nho 96dp + o tick chon.
+    // Tick chon giu nguyen khi doi trang (luu trong selectedChannelVideos).
+    private fun renderChannelVideosPage() {
+        if (!::channelVideosBox.isInitialized) return
+        channelVideosBox.removeAllViews()
+        val total = channelScanItems.size
+        val pages = channelScanPageCount()
+        if (channelScanPage >= pages) channelScanPage = pages - 1
+        if (channelScanPage < 0) channelScanPage = 0
+        val pageLabel = label("Kênh $channelScanName: $total video · Trang ${channelScanPage + 1}/$pages", 13f)
+        pageLabel.setTextColor(Color.WHITE)
+        channelVideosBox.addView(pageLabel)
+        val navRow = {
+            row(
+                btn("← Trang trước") { if (channelScanPage > 0) { channelScanPage--; renderChannelVideosPage() } },
+                btn("Trang sau →") { if (channelScanPage < pages - 1) { channelScanPage++; renderChannelVideosPage() } }
+            )
+        }
+        channelVideosBox.addView(navRow())
+        downloadSelectedBtn = btn("⬇ Tải các video đã chọn (0)", accent) { downloadSelectedChannelVideos() }
+        val dlLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        dlLp.setMargins(0, dp(4), 0, dp(2))
+        channelVideosBox.addView(downloadSelectedBtn, dlLp)
+        updateDownloadSelectedBtn()
+        val start = channelScanPage * 20
+        val end = minOf(start + 20, total)
+        for (idx in start until end) {
+            val item = channelScanItems[idx]
+            val mm = item.dur / 60000
+            val ss = (item.dur % 60000) / 1000
+            val itemBox = LinearLayout(this)
+            itemBox.orientation = LinearLayout.VERTICAL
+            itemBox.background = roundedBg(bgPanel, 10)
+            itemBox.setPadding(dp(8), dp(6), dp(8), dp(6))
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            lp.setMargins(0, dp(3), 0, dp(3))
+            val b = btn("🎬 ${item.title.take(50)} · $mm:${String.format("%02d", ss)} — Tải", -1) {
+                if (enqueueDownload(item.variant, item.title, listOf(item.variant), "https://www.douyin.com/")) {
+                    Toast.makeText(this, "Đã thêm vào hàng đợi. Qua tab Tải video để xem tiến trình.", Toast.LENGTH_LONG).show()
+                }
+            }
+            itemBox.addView(b)
+            val subRow = LinearLayout(this)
+            subRow.orientation = LinearLayout.HORIZONTAL
+            val thumb = ImageView(this)
+            thumb.scaleType = ImageView.ScaleType.CENTER_CROP
+            thumb.background = roundedBg(bgBtn, 8)
+            val thLp = LinearLayout.LayoutParams(dp(96), dp(96))
+            thLp.setMargins(0, dp(6), dp(8), 0)
+            thumb.layoutParams = thLp
+            subRow.addView(thumb)
+            if (item.cover.isNotEmpty()) loadChannelThumb(thumb, item.cover)
+            val cb = CheckBox(this)
+            cb.text = "Chọn video này"
+            cb.setTextColor(Color.rgb(215, 215, 220))
+            cb.textSize = 13f
+            cb.isChecked = selectedChannelVideos.contains(item)
+            cb.setOnCheckedChangeListener { _, checked ->
+                if (checked) selectedChannelVideos.add(item) else selectedChannelVideos.remove(item)
+                updateDownloadSelectedBtn()
+            }
+            subRow.addView(cb)
+            itemBox.addView(subRow)
+            channelVideosBox.addView(itemBox, lp)
+        }
+        channelVideosBox.addView(navRow())
+    }
+
+    private fun renderHistory() {
+        if (!::historyBox.isInitialized) return
+        historyBox.removeAllViews()
+        val prefs = getSharedPreferences("savego", Context.MODE_PRIVATE)
+        val arr = try { JSONArray(prefs.getString("history_json", "[]")) } catch (e: Exception) { JSONArray() }
+        if (arr.length() == 0) {
+            historyBox.addView(label("Chưa tải video nào."))
+            return
+        }
+        historyBox.addView(label("Đã tải ${arr.length()} mục gần nhất:"))
+        for (i in 0 until arr.length()) {
+            val e = arr.optJSONObject(i) ?: continue
+            val when_ = java.text.SimpleDateFormat("dd/MM HH:mm", java.util.Locale.getDefault())
+                .format(java.util.Date(e.optLong("time", 0)))
+            val tv = label("• ${e.optString("title", "video").take(70)}\n   Bản ${e.optString("quality")} · ${fmtSize(e.optLong("size", 0))} · $when_", 13f)
+            tv.setPadding(0, dp(5), 0, dp(5))
+            historyBox.addView(tv)
         }
     }
 }
