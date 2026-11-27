@@ -6,10 +6,10 @@ android {
     namespace 'com.example.apktest'
     compileSdk 34
     defaultConfig {
-        applicationId "com.example.choines"
+        applicationId "com.example.apktest"
         minSdk 24
         targetSdk 34
-        versionCode 3
+        versionCode 13
         versionName "6.7"
     }
     buildTypes { release { minifyEnabled false } }
