@@ -1,8 +1,10 @@
 package com.example.apktest
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -20,8 +22,11 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.SeekBar
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import java.io.DataInputStream
@@ -43,6 +48,8 @@ class MainActivity : AppCompatActivity() {
         const val BTN_LEFT = 0x40
         const val BTN_RIGHT = 0x80
         private const val REQ_ROM = 1001
+        // Cac nut co the keo tha + luu vi tri
+        private val CTL_KEYS = listOf("dpad", "a", "b", "sel", "start")
     }
 
     private val nes = Nes()
@@ -57,18 +64,22 @@ class MainActivity : AppCompatActivity() {
 
     // Trang thai dieu khien (OR vao nhau moi khung hinh)
     @Volatile var touchMask = 0
-    @Volatile var touchTurboA = false
-    @Volatile var touchTurboB = false
     @Volatile var padMask = 0
     @Volatile var motionMask = 0
-    @Volatile var padTurboA = false
-    @Volatile var padTurboB = false
+
+    // ----- Cai dat hien thi (luu SharedPreferences) -----
+    private lateinit var uiPrefs: SharedPreferences
+    @Volatile var uiScale = 1.0f           // 0.6x - 1.6x
+    @Volatile var moveMode = false         // che do keo tha nut
+    val ctlOffsets = HashMap<String, FloatArray>()  // key -> [dx, dy] px
 
     private var romKey = "game"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        loadUiPrefs()
 
         val root = FrameLayout(this)
         gameView = GameView(this)
@@ -88,10 +99,12 @@ class MainActivity : AppCompatActivity() {
                 text = if (muted) "Bật tiếng" else "Tắt tiếng"
             }
         }
+        val settingsBtn = Button(this).apply { text = "Cài đặt"; setOnClickListener { showDisplaySettings() } }
         bar.addView(romBtn)
         bar.addView(saveBtn)
         bar.addView(loadBtn)
         bar.addView(muteButton)
+        bar.addView(settingsBtn)
         val barParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT)
         barParams.gravity = Gravity.TOP or Gravity.START
@@ -132,6 +145,85 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    // ---------- Cai dat hien thi ----------
+    private fun loadUiPrefs() {
+        uiPrefs = getSharedPreferences("nes_display", Context.MODE_PRIVATE)
+        uiScale = uiPrefs.getFloat("scale", 1.0f).coerceIn(0.6f, 1.6f)
+        for (key in CTL_KEYS) {
+            ctlOffsets[key] = floatArrayOf(
+                uiPrefs.getFloat("off_${key}_x", 0f),
+                uiPrefs.getFloat("off_${key}_y", 0f))
+        }
+    }
+
+    private fun saveUiPrefs() {
+        val e = uiPrefs.edit()
+        e.putFloat("scale", uiScale)
+        for (key in CTL_KEYS) {
+            val o = ctlOffsets[key] ?: floatArrayOf(0f, 0f)
+            e.putFloat("off_${key}_x", o[0])
+            e.putFloat("off_${key}_y", o[1])
+        }
+        e.apply()
+    }
+
+    private fun showDisplaySettings() {
+        val d = resources.displayMetrics.density
+        val pad = (16 * d).toInt()
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, pad)
+        }
+        val scaleLabel = TextView(this).apply {
+            text = "Kích cỡ nút: ${"%.1f".format(uiScale)}x"
+            textSize = 15f
+        }
+        val seek = SeekBar(this).apply {
+            max = 100
+            progress = ((uiScale - 0.6f) * 100).toInt().coerceIn(0, 100)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
+                    uiScale = 0.6f + progress / 100f
+                    scaleLabel.text = "Kích cỡ nút: ${"%.1f".format(uiScale)}x"
+                    gameView.invalidate()
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) { }
+                override fun onStopTrackingTouch(sb: SeekBar?) { saveUiPrefs() }
+            })
+        }
+        val moveChk = CheckBox(this).apply {
+            text = "Di chuyển nút (kéo thả các nút trên màn hình tới vị trí tùy ý)"
+            textSize = 15f
+            isChecked = moveMode
+            setOnCheckedChangeListener { _, checked ->
+                moveMode = checked
+                if (checked) touchMask = 0
+                gameView.invalidate()
+            }
+        }
+        val resetBtn = Button(this).apply {
+            text = "Đặt lại vị trí gốc"
+            setOnClickListener {
+                for (key in CTL_KEYS) ctlOffsets[key] = floatArrayOf(0f, 0f)
+                uiScale = 1.0f
+                seek.progress = 40
+                scaleLabel.text = "Kích cỡ nút: 1.0x"
+                saveUiPrefs()
+                gameView.invalidate()
+                toast("Đã đặt lại vị trí + kích cỡ gốc")
+            }
+        }
+        layout.addView(scaleLabel)
+        layout.addView(seek)
+        layout.addView(moveChk)
+        layout.addView(resetBtn)
+        AlertDialog.Builder(this)
+            .setTitle("Cài đặt hiển thị")
+            .setView(layout)
+            .setPositiveButton("Đóng", null)
+            .show()
+    }
+
     // ---------- Audio ----------
     @Suppress("DEPRECATION")
     private fun startAudio() {
@@ -157,16 +249,7 @@ class MainActivity : AppCompatActivity() {
                 continue
             }
             val t0 = System.nanoTime()
-            var mask = touchMask or padMask or motionMask
-            // Turbo ~12 lan/giay: nua chu ky ~42ms
-            val phaseOn = (System.currentTimeMillis() / 42L) % 2L == 0L
-            if (touchTurboA || padTurboA) {
-                mask = if (phaseOn) mask or BTN_A else mask and BTN_A.inv()
-            }
-            if (touchTurboB || padTurboB) {
-                mask = if (phaseOn) mask or BTN_B else mask and BTN_B.inv()
-            }
-            nes.pad1.buttons = mask
+            nes.pad1.buttons = touchMask or padMask or motionMask
             nes.runFrame()
             val samples = nes.apu.drainSamples()
             if (!muted && samples.isNotEmpty()) {
@@ -248,6 +331,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---------- Tay cam roi: phim cung ----------
+    // A = nhay, B = ban; Y = A, X = B (nut thuong, khong turbo)
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val bit = when (event.keyCode) {
             KeyEvent.KEYCODE_DPAD_UP -> BTN_UP
@@ -255,28 +339,17 @@ class MainActivity : AppCompatActivity() {
             KeyEvent.KEYCODE_DPAD_LEFT -> BTN_LEFT
             KeyEvent.KEYCODE_DPAD_RIGHT -> BTN_RIGHT
             KeyEvent.KEYCODE_BUTTON_A -> BTN_A
+            KeyEvent.KEYCODE_BUTTON_Y -> BTN_A
             KeyEvent.KEYCODE_BUTTON_B -> BTN_B
+            KeyEvent.KEYCODE_BUTTON_X -> BTN_B
             KeyEvent.KEYCODE_BUTTON_START -> BTN_START
             KeyEvent.KEYCODE_BUTTON_SELECT -> BTN_SELECT
             else -> 0
         }
-        val turbo = when (event.keyCode) {
-            KeyEvent.KEYCODE_BUTTON_Y -> 1 // turbo A
-            KeyEvent.KEYCODE_BUTTON_X -> 2 // turbo B
-            else -> 0
-        }
-        if (bit == 0 && turbo == 0) return super.dispatchKeyEvent(event)
+        if (bit == 0) return super.dispatchKeyEvent(event)
         when (event.action) {
-            KeyEvent.ACTION_DOWN -> {
-                if (bit != 0) padMask = padMask or bit
-                if (turbo == 1) padTurboA = true
-                if (turbo == 2) padTurboB = true
-            }
-            KeyEvent.ACTION_UP -> {
-                if (bit != 0) padMask = padMask and bit.inv()
-                if (turbo == 1) padTurboA = false
-                if (turbo == 2) padTurboB = false
-            }
+            KeyEvent.ACTION_DOWN -> padMask = padMask or bit
+            KeyEvent.ACTION_UP -> padMask = padMask and bit.inv()
         }
         return true
     }
@@ -314,35 +387,55 @@ class MainActivity : AppCompatActivity() {
         private val srcRect = Rect(0, 0, 256, 240)
         private val dstRect = Rect()
         private val shapePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            color = Color.argb(230, 255, 210, 60)
+            strokeWidth = 2f
+        }
         private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             textAlign = Paint.Align.CENTER
         }
 
         private var d = 1f
-        private var dpadCx = 0f
-        private var dpadCy = 0f
-        private var arm = 0f
-        private var armW = 0f
-        // key = bit (hoac bit or 0x100 cho turbo) -> [cx, cy, r, loai] loai: 0 thuong, 1 turbo
-        private val circles = HashMap<Int, FloatArray>()
-        private var selectRect = RectF()
-        private var startRect = RectF()
+
+        // Keo tha trong che do di chuyen nut
+        private var dragKey: String? = null
+        private var dragStartX = 0f
+        private var dragStartY = 0f
+        private var dragOrigX = 0f
+        private var dragOrigY = 0f
 
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
             super.onSizeChanged(w, h, oldw, oldh)
             d = resources.displayMetrics.density
-            dpadCx = 108f * d
-            dpadCy = h - 108f * d
-            arm = 60f * d
-            armW = 22f * d
-            circles.clear()
-            circles[BTN_A] = floatArrayOf(w - 62f * d, h - 92f * d, 33f * d, 0f)
-            circles[BTN_B] = floatArrayOf(w - 152f * d, h - 62f * d, 33f * d, 0f)
-            circles[BTN_A or 0x100] = floatArrayOf(w - 62f * d, h - 188f * d, 29f * d, 1f)
-            circles[BTN_B or 0x100] = floatArrayOf(w - 152f * d, h - 158f * d, 29f * d, 1f)
-            selectRect = RectF(w / 2f - 126f * d, h - 42f * d, w / 2f - 14f * d, h - 16f * d)
-            startRect = RectF(w / 2f + 14f * d, h - 42f * d, w / 2f + 126f * d, h - 16f * d)
+            strokePaint.strokeWidth = 2f * d
+        }
+
+        // ----- Bo cuc: vi tri goc + offset nguoi dung, kich co theo uiScale -----
+        private fun off(key: String): FloatArray = ctlOffsets[key] ?: floatArrayOf(0f, 0f)
+        private fun dpadCx(): Float = 108f * d + off("dpad")[0]
+        private fun dpadCy(): Float = height - 108f * d + off("dpad")[1]
+        private fun arm(): Float = 60f * d * uiScale
+        private fun armW(): Float = 22f * d * uiScale
+        private fun aCx(): Float = width - 62f * d + off("a")[0]
+        private fun aCy(): Float = height - 92f * d + off("a")[1]
+        private fun bCx(): Float = width - 152f * d + off("b")[0]
+        private fun bCy(): Float = height - 62f * d + off("b")[1]
+        private fun btnR(): Float = 33f * d * uiScale
+        private fun selRect(): RectF {
+            val cx = width / 2f - 70f * d + off("sel")[0]
+            val cy = height - 29f * d + off("sel")[1]
+            val w = 112f * d * uiScale
+            val h = 26f * d * uiScale
+            return RectF(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+        }
+        private fun startRect(): RectF {
+            val cx = width / 2f + 70f * d + off("start")[0]
+            val cy = height - 29f * d + off("start")[1]
+            val w = 112f * d * uiScale
+            val h = 26f * d * uiScale
+            return RectF(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
         }
 
         override fun onDraw(canvas: Canvas) {
@@ -360,54 +453,93 @@ class MainActivity : AppCompatActivity() {
                 canvas.drawText("Bấm nút ROM ở góc trên để chọn game .nes", width / 2f, height / 2f, labelPaint)
             }
             drawControls(canvas)
+            if (moveMode) drawMoveHints(canvas)
         }
 
         private fun drawControls(canvas: Canvas) {
-            // D-pad
+            val cx = dpadCx(); val cy = dpadCy()
+            val a = arm(); val aw = armW()
+            // D-pad: chu thap 4 huong
             shapePaint.color = Color.argb(70, 255, 255, 255)
-            canvas.drawRect(dpadCx - armW, dpadCy - arm, dpadCx + armW, dpadCy + arm, shapePaint)
-            canvas.drawRect(dpadCx - arm, dpadCy - armW, dpadCx + arm, dpadCy + armW, shapePaint)
+            canvas.drawRect(cx - aw, cy - a, cx + aw, cy + a, shapePaint)
+            canvas.drawRect(cx - a, cy - aw, cx + a, cy + aw, shapePaint)
             shapePaint.color = Color.argb(150, 255, 255, 255)
-            val dz = arm * 0.55f
-            if ((touchMask and BTN_UP) != 0) canvas.drawCircle(dpadCx, dpadCy - dz, armW * 0.85f, shapePaint)
-            if ((touchMask and BTN_DOWN) != 0) canvas.drawCircle(dpadCx, dpadCy + dz, armW * 0.85f, shapePaint)
-            if ((touchMask and BTN_LEFT) != 0) canvas.drawCircle(dpadCx - dz, dpadCy, armW * 0.85f, shapePaint)
-            if ((touchMask and BTN_RIGHT) != 0) canvas.drawCircle(dpadCx + dz, dpadCy, armW * 0.85f, shapePaint)
+            val dz = a * 0.55f
+            if ((touchMask and BTN_UP) != 0) canvas.drawCircle(cx, cy - dz, aw * 0.85f, shapePaint)
+            if ((touchMask and BTN_DOWN) != 0) canvas.drawCircle(cx, cy + dz, aw * 0.85f, shapePaint)
+            if ((touchMask and BTN_LEFT) != 0) canvas.drawCircle(cx - dz, cy, aw * 0.85f, shapePaint)
+            if ((touchMask and BTN_RIGHT) != 0) canvas.drawCircle(cx + dz, cy, aw * 0.85f, shapePaint)
 
-            // 4 nut hanh dong: A, B, TA (turbo A), TB (turbo B)
-            drawButton(canvas, BTN_A, "A", (touchMask and BTN_A) != 0)
-            drawButton(canvas, BTN_B, "B", (touchMask and BTN_B) != 0)
-            drawButton(canvas, BTN_A or 0x100, "TA", touchTurboA)
-            drawButton(canvas, BTN_B or 0x100, "TB", touchTurboB)
+            // Chi 2 nut hanh dong: A (nhay), B (ban)
+            drawButton(canvas, aCx(), aCy(), "A", (touchMask and BTN_A) != 0)
+            drawButton(canvas, bCx(), bCy(), "B", (touchMask and BTN_B) != 0)
 
             // Select / Start
+            val sr = selRect(); val tr = startRect()
             shapePaint.color = Color.argb(if ((touchMask and BTN_SELECT) != 0) 170 else 80, 255, 255, 255)
-            canvas.drawRoundRect(selectRect, 10f * d, 10f * d, shapePaint)
+            canvas.drawRoundRect(sr, 10f * d, 10f * d, shapePaint)
             shapePaint.color = Color.argb(if ((touchMask and BTN_START) != 0) 170 else 80, 255, 255, 255)
-            canvas.drawRoundRect(startRect, 10f * d, 10f * d, shapePaint)
-            labelPaint.textSize = 10f * d
-            canvas.drawText("SELECT", selectRect.centerX(), selectRect.centerY() + 4f * d, labelPaint)
-            canvas.drawText("START", startRect.centerX(), startRect.centerY() + 4f * d, labelPaint)
+            canvas.drawRoundRect(tr, 10f * d, 10f * d, shapePaint)
+            labelPaint.textSize = 10f * d * uiScale
+            canvas.drawText("SELECT", sr.centerX(), sr.centerY() + 4f * d, labelPaint)
+            canvas.drawText("START", tr.centerX(), tr.centerY() + 4f * d, labelPaint)
         }
 
-        private fun drawButton(canvas: Canvas, key: Int, label: String, pressed: Boolean) {
-            val c = circles[key] ?: return
-            val turbo = c[3] > 0.5f
-            shapePaint.color = when {
-                pressed -> Color.argb(200, 255, 210, 60)
-                turbo -> Color.argb(90, 120, 200, 255)
-                else -> Color.argb(90, 255, 90, 90)
+        private fun drawButton(canvas: Canvas, cx: Float, cy: Float, label: String, pressed: Boolean) {
+            shapePaint.color = if (pressed) Color.argb(200, 255, 210, 60) else Color.argb(90, 255, 90, 90)
+            canvas.drawCircle(cx, cy, btnR(), shapePaint)
+            labelPaint.textSize = 19f * d * uiScale
+            canvas.drawText(label, cx, cy + 6f * d * uiScale, labelPaint)
+        }
+
+        private fun drawMoveHints(canvas: Canvas) {
+            val cx = dpadCx(); val cy = dpadCy(); val a = arm()
+            canvas.drawRect(cx - a, cy - a, cx + a, cy + a, strokePaint)
+            canvas.drawCircle(aCx(), aCy(), btnR(), strokePaint)
+            canvas.drawCircle(bCx(), bCy(), btnR(), strokePaint)
+            canvas.drawRoundRect(selRect(), 10f * d, 10f * d, strokePaint)
+            canvas.drawRoundRect(startRect(), 10f * d, 10f * d, strokePaint)
+            labelPaint.textSize = 13f * d
+            canvas.drawText("Đang di chuyển nút: kéo thả từng nút tới vị trí mong muốn",
+                width / 2f, 30f * d, labelPaint)
+        }
+
+        // D-pad don gian: 4 vung doc lap, moi diem cham cho toi da 1 huong
+        private fun dpadDirection(px: Float, py: Float): Int {
+            val dx = px - dpadCx()
+            val dy = py - dpadCy()
+            val a = arm(); val aw = armW()
+            if (abs(dx) > a || abs(dy) > a) return 0
+            val dead = 7f * d
+            if (abs(dx) < dead && abs(dy) < dead) return 0
+            val inVerticalArm = abs(dx) <= aw
+            val inHorizontalArm = abs(dy) <= aw
+            if (inVerticalArm && abs(dy) > dead) return if (dy < 0) BTN_UP else BTN_DOWN
+            if (inHorizontalArm && abs(dx) > dead) return if (dx < 0) BTN_LEFT else BTN_RIGHT
+            // Goc cheo: lay huong manh hon (van chi 1 huong)
+            return if (abs(dx) > abs(dy)) {
+                if (dx < 0) BTN_LEFT else BTN_RIGHT
+            } else {
+                if (dy < 0) BTN_UP else BTN_DOWN
             }
-            canvas.drawCircle(c[0], c[1], c[2], shapePaint)
-            labelPaint.textSize = (if (turbo) 15f else 19f) * d
-            canvas.drawText(label, c[0], c[1] + 6f * d, labelPaint)
+        }
+
+        private fun hitControl(px: Float, py: Float): String? {
+            val m = 10f * d
+            var dx = px - aCx(); var dy = py - aCy()
+            if (dx * dx + dy * dy <= (btnR() + m) * (btnR() + m)) return "a"
+            dx = px - bCx(); dy = py - bCy()
+            if (dx * dx + dy * dy <= (btnR() + m) * (btnR() + m)) return "b"
+            if (selRect().contains(px, py)) return "sel"
+            if (startRect().contains(px, py)) return "start"
+            if (abs(px - dpadCx()) <= arm() && abs(py - dpadCy()) <= arm()) return "dpad"
+            return null
         }
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
+            if (moveMode) return onTouchMoveMode(event)
             if (event.actionMasked == MotionEvent.ACTION_CANCEL) {
                 touchMask = 0
-                touchTurboA = false
-                touchTurboB = false
                 invalidate()
                 return true
             }
@@ -416,45 +548,56 @@ class MainActivity : AppCompatActivity() {
                     event.getPointerId(event.actionIndex)
                 else -> -1
             }
+            // Cap nhat ngay trong su kien cham: quet toan bo pointer dang cham
             var m = 0
-            var ta = false
-            var tb = false
+            val sr = selRect(); val tr = startRect()
+            val rr = btnR() + 8f * d
             for (i in 0 until event.pointerCount) {
                 val pid = event.getPointerId(i)
                 if (pid == upPid) continue
                 val px = event.getX(i)
                 val py = event.getY(i)
-                // D-pad
-                val dx = px - dpadCx
-                val dy = py - dpadCy
-                val inCross = (abs(dx) <= arm && abs(dy) <= armW) || (abs(dy) <= arm && abs(dx) <= armW)
-                if (inCross) {
-                    val dead = 9f * d
-                    if (dy < -dead) m = m or BTN_UP
-                    if (dy > dead) m = m or BTN_DOWN
-                    if (dx < -dead) m = m or BTN_LEFT
-                    if (dx > dead) m = m or BTN_RIGHT
-                }
-                // Cac nut tron (A, B, TA, TB)
-                for ((key, c) in circles) {
-                    val ddx = px - c[0]
-                    val ddy = py - c[1]
-                    val rr = c[2] + 8f * d
-                    if (ddx * ddx + ddy * ddy <= rr * rr) {
-                        if (c[3] > 0.5f) {
-                            if ((key and BTN_A) != 0) ta = true else tb = true
-                        } else {
-                            m = m or key
-                        }
-                    }
-                }
-                if (selectRect.contains(px, py)) m = m or BTN_SELECT
-                if (startRect.contains(px, py)) m = m or BTN_START
+                m = m or dpadDirection(px, py)
+                var dx = px - aCx(); var dy = py - aCy()
+                if (dx * dx + dy * dy <= rr * rr) m = m or BTN_A
+                dx = px - bCx(); dy = py - bCy()
+                if (dx * dx + dy * dy <= rr * rr) m = m or BTN_B
+                if (sr.contains(px, py)) m = m or BTN_SELECT
+                if (tr.contains(px, py)) m = m or BTN_START
             }
             touchMask = m
-            touchTurboA = ta
-            touchTurboB = tb
             invalidate()
+            return true
+        }
+
+        private fun onTouchMoveMode(event: MotionEvent): Boolean {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    dragKey = hitControl(event.x, event.y)
+                    if (dragKey != null) {
+                        dragStartX = event.x
+                        dragStartY = event.y
+                        val o = off(dragKey!!)
+                        dragOrigX = o[0]
+                        dragOrigY = o[1]
+                    }
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val key = dragKey
+                    if (key != null) {
+                        ctlOffsets[key] = floatArrayOf(
+                            dragOrigX + (event.x - dragStartX),
+                            dragOrigY + (event.y - dragStartY))
+                        invalidate()
+                    }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (dragKey != null) {
+                        dragKey = null
+                        saveUiPrefs()
+                    }
+                }
+            }
             return true
         }
     }
